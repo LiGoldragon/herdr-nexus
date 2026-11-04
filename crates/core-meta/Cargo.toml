@@ -1,0 +1,20 @@
+[package]
+name = "core-meta-herdr-nexus"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+default = []
+datom = ["meta-signal-herdr-nexus/datom", "dep:datom-codec", "dep:protos"]
+
+[dependencies]
+rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+signal.workspace = true
+meta-signal-herdr-nexus.workspace = true
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d90ff185d54bc0007b19a8d9bc390c6bfeb12", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
+
+[lints.rust]
+unsafe_code = "forbid"

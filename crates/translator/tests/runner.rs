@@ -14,7 +14,6 @@ fn shell(
         Path::new("/bin/sh"),
         &[OsString::from("-c"), OsString::from(script)],
         Instant::now().checked_add(timeout).expect("test deadline"),
-        Duration::from_millis(1),
         limit,
     )
 }
@@ -54,7 +53,6 @@ fn spawn_failure_is_typed() {
         Path::new("/definitely/not/a/program"),
         &[],
         Instant::now() + Duration::from_secs(1),
-        Duration::from_millis(1),
         1,
     );
     assert!(matches!(result, Err(RunError::Spawn(_))));

@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "autocfg"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
 name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -56,6 +62,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
+name = "core-meta-herdr-nexus"
+version = "0.1.0"
+dependencies = [
+ "datom-codec 0.32.3",
+ "meta-signal-herdr-nexus",
+ "protos",
+ "rkyv",
+ "signal",
+]
+
+[[package]]
 name = "datom-codec"
 version = "0.32.2"
 source = "git+https://github.com/LiGoldragon/datom-codec?rev=4dff16b4f7412febc3b71aac8b49680cd20988cb#4dff16b4f7412febc3b71aac8b49680cd20988cb"
@@ -99,7 +116,6 @@ name = "emission-herdr-nexus"
 version = "0.1.0"
 dependencies = [
  "datom-codec 0.32.3",
- "meta-signal-herdr-nexus",
  "protos",
  "rkyv",
  "signal",
@@ -161,6 +177,7 @@ name = "herdr-nexus-core"
 version = "0.1.0"
 dependencies = [
  "emission-herdr-nexus",
+ "rkyv",
  "signal-herdr-nexus",
 ]
 
@@ -168,6 +185,7 @@ dependencies = [
 name = "herdr-nexus-daemon"
 version = "0.1.0"
 dependencies = [
+ "core-meta-herdr-nexus",
  "emission-herdr-nexus",
  "herdr-nexus-core",
  "meta-signal-herdr-nexus",
@@ -183,11 +201,14 @@ version = "0.1.0"
 dependencies = [
  "datom-codec 0.32.3",
  "emission-herdr-nexus",
+ "libc",
  "meta-signal-herdr-nexus",
  "nix",
  "protos",
+ "rkyv",
  "serde",
  "serde_json",
+ "signal",
  "signal-herdr-nexus",
  "translator",
 ]
@@ -232,9 +253,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "memoffset"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "meta-signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=0e3c7abee1c2939793b88ca6a39b991b2a17de64#0e3c7abee1c2939793b88ca6a39b991b2a17de64"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=b786f020c4fdcc884405dfad4cd74d5b56ff08a5#b786f020c4fdcc884405dfad4cd74d5b56ff08a5"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",
@@ -272,6 +302,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -447,7 +478,7 @@ dependencies = [
 [[package]]
 name = "signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=2a6c8883bb9ce1ac9467c359bd323c3aa895d580#2a6c8883bb9ce1ac9467c359bd323c3aa895d580"
+source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=771960c643cc63b5280919cdaad059944a7a048d#771960c643cc63b5280919cdaad059944a7a048d"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",

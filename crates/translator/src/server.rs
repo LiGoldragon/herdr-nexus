@@ -1,10 +1,9 @@
 use crate::runner::{self, Captured};
 use emission_herdr_nexus::{ExternalOutcome, Herdr, PaneObservation, Verb};
-use meta_signal_herdr_nexus::Configuration;
 use serde::Deserialize;
 use shared_translator::placement::Place;
 use shared_translator::{
-    FrameCapacity, FrameReading, FrameWriting, Restorable, Signal, Signalizable,
+    ByteViewable, Restorable, Signal, Signalizable,
 };
 use signal_herdr_nexus::{
     AgentKind, ErrorCode, Executable, ExitStatus, Message, Pane, PaneId, Refusal, Session, State,
@@ -23,40 +22,161 @@ const MAXIMUM_SIGNAL_BYTES: usize = 8 * 1024 * 1024;
 pub fn run(place: &Place) -> Result<(), ServerError> {
     let socket = Path::new(&place.directory.0).join(SOCKET_NAME);
     let bound = OwnedSocket::bind(socket)?;
+    let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
     for stream in bound.listener.incoming() {
         let Ok(mut stream) = stream else { continue };
-        let _ = serve_one(&mut stream);
+        let configuration = std::sync::Arc::clone(&configuration);
+        std::thread::spawn(move || {
+            let _ = serve_one(&mut stream, &configuration);
+        });
     }
     Ok(())
 }
 
-pub fn serve_one(stream: &mut UnixStream) -> Result<(), ServerError> {
-    let maximum = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
-    let body = stream.read_frame(maximum).map_err(ServerError::Frame)?;
-    let request = Signal::<emission_herdr_nexus::Query>::from(Vec::from(body))
-        .restore()
-        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-    let emission_herdr_nexus::Query::Execute(data) = request;
-    let response_capacity = frame_capacity(&data.configuration).unwrap_or(maximum);
-    let outcome = execute(&data.configuration, &data.herdr);
-    let response = emission_herdr_nexus::Response::Executed(outcome)
-        .signalize()
-        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-    stream
-        .write_frame(&response, response_capacity)
-        .map_err(ServerError::Frame)
+pub fn serve_one(
+    stream: &mut UnixStream,
+    configuration: &TranslatorConfiguration,
+) -> Result<(), ServerError> {
+    use crate::transport::{self, Frame};
+    use crate::transport_types::{Kind, Lane};
+    let request = transport::read_frame(stream, MAXIMUM_SIGNAL_BYTES)
+        .map_err(ServerError::Transport)?;
+    if request.kind != Kind::Request {
+        return Err(ServerError::Transport(crate::transport::TransportError::InvalidLength));
+    }
+    let response = match request.lane {
+        Lane::EmissionSignal => {
+            let query = Signal::<emission_herdr_nexus::Query>::from(request.payload)
+                .restore()
+                .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+            let Some(runtime) = configuration.runtime() else {
+                return write_failure(stream, Lane::EmissionSignal, "translator is awaiting settings");
+            };
+            let emission_herdr_nexus::Query::Emit(herdr) = query;
+            let response = emission_herdr_nexus::Response::Emitted(execute(&runtime, &herdr))
+                .signalize()
+                .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+            Frame { lane: Lane::EmissionSignal, kind: Kind::Answered, payload: response.bytes().to_vec() }
+        }
+        Lane::MetaText => {
+            let text = request.text().map_err(ServerError::Transport)?;
+            let response = configuration.configure_text(text)?;
+            Frame { lane: Lane::MetaText, kind: Kind::Answered, payload: response.into_bytes() }
+        }
+        Lane::PublicText => {
+            return write_failure(stream, Lane::PublicText, "public Nexus forwarding is not ready");
+        }
+    };
+    transport::write_frame(stream, &response, MAXIMUM_SIGNAL_BYTES)
+        .map_err(ServerError::Transport)
+}
+
+fn write_failure(stream: &mut UnixStream, lane: crate::transport_types::Lane, message: &str) -> Result<(), ServerError> {
+    crate::transport::write_frame(stream, &crate::transport::Frame {
+        lane,
+        kind: crate::transport_types::Kind::Failed,
+        payload: message.as_bytes().to_vec(),
+    }, MAXIMUM_SIGNAL_BYTES).map_err(ServerError::Transport)
+}
+
+#[derive(Default)]
+pub struct TranslatorConfiguration {
+    partial: std::sync::RwLock<PartialTranslatorConfiguration>,
+}
+
+#[derive(Clone, Default)]
+struct PartialTranslatorConfiguration {
+    executable: Option<PathBuf>,
+    call_timeout: Option<Duration>,
+    output_limit: Option<usize>,
+    text_budget: Option<(usize, usize)>,
+}
+
+impl TranslatorConfiguration {
+    fn runtime(&self) -> Option<Runtime> {
+        let partial = self.partial.read().ok()?.clone();
+        Runtime::new(partial.executable?, partial.call_timeout?, partial.output_limit?)
+            .filter(|_| partial.text_budget.is_some())
+    }
+
+    #[cfg(feature = "text")]
+    fn configure_text(&self, text: &str) -> Result<String, ServerError> {
+        use datom_codec::{Actualizing, Budget, Potential};
+        let mut budget = Budget {
+            remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("signal bound fits budget"),
+            reader: protos::ReaderBudget { remaining: signal::MAXIMUM_SIGNAL_BYTES },
+            depth: 0,
+            maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH).expect("signal depth fits budget"),
+        };
+        let mut potential = Potential::<meta_signal_herdr_nexus::Query>::from(text);
+        let query = potential.actualize(&mut budget)
+            .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+        let meta_signal_herdr_nexus::Query::Configure(setting) = query;
+        let response = self.apply(setting);
+        Ok(shared_translator::encode(&response))
+    }
+
+    #[cfg(not(feature = "text"))]
+    fn configure_text(&self, _text: &str) -> Result<String, ServerError> {
+        Err(ServerError::Signal("translator built without text capability".into()))
+    }
+
+    fn apply(&self, setting: meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nexus::Response {
+        use meta_signal_herdr_nexus::{Configured_Data, Owner, Readiness, Response, Set, SettingName};
+        let mut partial = self.partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let invalid = match setting {
+            Set::HerdrPath(value) if !value.0.is_empty() => { partial.executable = Some(PathBuf::from(value.0)); None }
+            Set::CallTimeout(value) => positive_duration(value.0).map(|value| { partial.call_timeout = Some(value); }).is_none().then_some(SettingName::CallTimeout),
+            Set::OutputLimit(value) => usize::try_from(value.0).ok().filter(|value| *value > 0).map(|value| { partial.output_limit = Some(value); }).is_none().then_some(SettingName::OutputLimit),
+            Set::TextBudget(value) => {
+                let nodes = usize::try_from(value.node_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES);
+                let depth = usize::try_from(value.depth_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH);
+                match (nodes, depth) { (Some(nodes), Some(depth)) => { partial.text_budget = Some((nodes, depth)); None }, _ => Some(SettingName::TextBudget) }
+            }
+            Set::HerdrPath(_) => Some(SettingName::HerdrPath),
+            other => return Response::ConfigureRefused(invalid_setting(Owner::Translator, setting_name(&other), "setting belongs to Nexus")),
+        };
+        if let Some(name) = invalid {
+            return Response::ConfigureRefused(invalid_setting(Owner::Translator, name, "invalid setting value"));
+        }
+        let mut awaiting = Vec::new();
+        if partial.executable.is_none() { awaiting.push(SettingName::HerdrPath); }
+        if partial.call_timeout.is_none() { awaiting.push(SettingName::CallTimeout); }
+        if partial.output_limit.is_none() { awaiting.push(SettingName::OutputLimit); }
+        if partial.text_budget.is_none() { awaiting.push(SettingName::TextBudget); }
+        Response::Configured(Configured_Data { owner: Owner::Translator, readiness: if awaiting.is_empty() { Readiness::Ready } else { Readiness::Awaiting(awaiting) } })
+    }
+}
+
+fn setting_name(setting: &meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nexus::SettingName {
+    use meta_signal_herdr_nexus::{Set, SettingName};
+    match setting {
+        Set::HerdrPath(_) => SettingName::HerdrPath,
+        Set::CallTimeout(_) => SettingName::CallTimeout,
+        Set::OutputLimit(_) => SettingName::OutputLimit,
+        Set::TextBudget(_) => SettingName::TextBudget,
+        Set::StartTimeout(_) => SettingName::StartTimeout,
+        Set::Polling(_) => SettingName::Polling,
+        Set::FrameCapacity(_) => SettingName::FrameCapacity,
+        Set::TransportTimeout(_) => SettingName::TransportTimeout,
+    }
+}
+
+fn invalid_setting(owner: meta_signal_herdr_nexus::Owner, setting_name: meta_signal_herdr_nexus::SettingName, message: &str) -> meta_signal_herdr_nexus::ConfigurationRefusal {
+    meta_signal_herdr_nexus::ConfigurationRefusal::Invalid(meta_signal_herdr_nexus::Invalid_Data {
+        owner, setting_name, message: meta_signal_herdr_nexus::Message(message.into()),
+    })
 }
 
 /// Executes one typed external emission with a captured configuration snapshot.
-pub fn execute(configuration: &Configuration, herdr: &Herdr) -> ExternalOutcome {
-    let Some(runtime) = Runtime::from_configuration(configuration) else {
-        return ExternalOutcome::Uncertain;
-    };
+pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
     match &herdr.verb {
-        Verb::PaneList => execute_list(&runtime, &herdr.session),
+        Verb::PaneList => execute_list(runtime, &herdr.session),
         verb => {
-            let invocation = invocation(&herdr.session, verb, &runtime);
-            let Some(captured) = run_invocation(&runtime, &invocation) else {
+            let Some(invocation) = invocation(&herdr.session, verb, runtime) else {
+                return ExternalOutcome::Uncertain;
+            };
+            let Some(captured) = run_invocation(runtime, &invocation) else {
                 return ExternalOutcome::Uncertain;
             };
             decode(&invocation.decoder, captured, &herdr.session)
@@ -65,32 +185,20 @@ pub fn execute(configuration: &Configuration, herdr: &Herdr) -> ExternalOutcome 
 }
 
 #[derive(Clone)]
-struct Runtime {
-    executable: PathBuf,
-    polling: Duration,
-    call_timeout: Duration,
-    start_timeout: Duration,
-    output_limit: usize,
+pub struct Runtime {
+    pub executable: PathBuf,
+    pub call_timeout: Duration,
+    pub output_limit: usize,
 }
 
 impl Runtime {
-    fn from_configuration(configuration: &Configuration) -> Option<Self> {
-        let polling = positive_duration(configuration.polling_milliseconds.0)?;
-        let call_timeout = positive_duration(configuration.call_timeout_milliseconds.0)?;
-        let start_timeout = positive_duration(configuration.start_timeout_milliseconds.0)?;
-        let output_limit = usize::try_from(configuration.external_output_limit_bytes.0).ok()?;
-        let frame = usize::try_from(configuration.frame_capacity_bytes.0).ok()?;
-        if configuration.herdr_executable.0.is_empty()
-            || output_limit == 0
-            || !(1..=MAXIMUM_SIGNAL_BYTES).contains(&frame)
-        {
+    pub fn new(executable: PathBuf, call_timeout: Duration, output_limit: usize) -> Option<Self> {
+        if executable.as_os_str().is_empty() || call_timeout.is_zero() || output_limit == 0 {
             return None;
         }
         Some(Self {
-            executable: PathBuf::from(&configuration.herdr_executable.0),
-            polling,
+            executable,
             call_timeout,
-            start_timeout,
             output_limit,
         })
     }
@@ -99,13 +207,6 @@ impl Runtime {
 fn positive_duration(milliseconds: i64) -> Option<Duration> {
     let milliseconds = u64::try_from(milliseconds).ok()?;
     (milliseconds != 0).then(|| Duration::from_millis(milliseconds))
-}
-
-fn frame_capacity(configuration: &Configuration) -> Option<FrameCapacity> {
-    let capacity = usize::try_from(configuration.frame_capacity_bytes.0).ok()?;
-    (1..=MAXIMUM_SIGNAL_BYTES)
-        .contains(&capacity)
-        .then(|| FrameCapacity::from(capacity))
 }
 
 struct Invocation {
@@ -130,7 +231,7 @@ enum Decoder {
     AgentList,
 }
 
-fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
+fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invocation> {
     let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
     let (specific, timeout, decoder) = match verb {
         Verb::WorkspaceCreate(data) => {
@@ -150,6 +251,7 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
             (values, runtime.call_timeout, Decoder::WorkspaceCreate)
         }
         Verb::AgentStart(data) => {
+            let start_timeout = positive_duration(data.timeout.0)?;
             let kind = agent_kind(&data.command.agent_kind);
             let mut values = vec![
                 OsString::from("agent"),
@@ -166,7 +268,7 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
             }
             values.push(OsString::from("--timeout"));
             values.push(OsString::from(
-                runtime.start_timeout.as_millis().to_string(),
+                start_timeout.as_millis().to_string(),
             ));
             if !data.command.string_vector.is_empty() {
                 values.push(OsString::from("--"));
@@ -174,7 +276,7 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
             }
             (
                 values,
-                runtime.start_timeout,
+            start_timeout,
                 Decoder::AgentStart {
                     pane_id: data.pane_id.0.clone(),
                     name: data.command.agent_name.0.clone(),
@@ -215,11 +317,11 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
         Verb::PaneList => unreachable!("list has a complete-snapshot path"),
     };
     arguments.extend(specific);
-    Invocation {
+    Some(Invocation {
         arguments,
         timeout,
         decoder,
-    }
+    })
 }
 
 fn list_invocation(session: &Session, runtime: &Runtime, agent: bool) -> Invocation {
@@ -246,7 +348,6 @@ fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured
         &runtime.executable,
         &invocation.arguments,
         deadline,
-        runtime.polling,
         runtime.output_limit,
     )
     .ok()
@@ -443,7 +544,7 @@ fn decode_start(bytes: &[u8], pane_id: &str, name: &str, kind: &str) -> External
     {
         return ExternalOutcome::Uncertain;
     }
-    ExternalOutcome::Done
+    ExternalOutcome::Started(agent_state(&result.agent))
 }
 
 fn decode_prompt(bytes: &[u8], pane_id: &str) -> ExternalOutcome {
@@ -600,7 +701,7 @@ impl Drop for OwnedSocket {
 #[derive(Debug)]
 pub enum ServerError {
     Io(std::io::Error),
-    Frame(shared_translator::FrameError),
+    Transport(crate::transport::TransportError),
     Signal(String),
 }
 
@@ -703,11 +804,11 @@ mod tests {
         );
         assert_eq!(
             decode_start(minimal.as_bytes(), "w:p", "probe", "codex"),
-            ExternalOutcome::Done
+            ExternalOutcome::Started(State::Idle)
         );
         assert_eq!(
             decode_start(convenience.as_bytes(), "w:p", "probe", "codex"),
-            ExternalOutcome::Done
+            ExternalOutcome::Started(State::Idle)
         );
     }
 

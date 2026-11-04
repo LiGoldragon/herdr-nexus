@@ -1,8 +1,6 @@
 //! Daemon configuration lifecycle, independent of socket serving.
 
-use meta_signal_herdr_nexus::{
-    BootstrapRefusal, Configuration, ConfigurationError, ConfigureOutcome, Message, SocketPath,
-};
+use meta_signal_herdr_nexus::{BootstrapRefusal, Message, SocketPath};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
@@ -127,8 +125,8 @@ impl Bootstrap {
         })
     }
 
-    pub fn configure(&self, candidate: Configuration) -> ConfigureOutcome {
-        self.store.configure(candidate, || {
+    pub fn configure(&self, setting: core_meta_herdr_nexus::CoreSet) -> core_meta_herdr_nexus::Response {
+        self.store.configure(setting, || {
             let listener = OwnedListener::bind(self.paths.public.clone()).map_err(|error| {
                 BootstrapRefusal {
                     socket_path: SocketPath(self.paths.public.display().to_string()),
@@ -186,18 +184,16 @@ impl Bootstrap {
 pub fn serve_meta_once<S>(
     stream: &mut S,
     capacity: signal::FrameCapacity,
-    configure: impl FnOnce(Configuration) -> ConfigureOutcome,
+    configure: impl FnOnce(core_meta_herdr_nexus::CoreSet) -> core_meta_herdr_nexus::Response,
 ) -> Result<(), Box<dyn std::error::Error>>
 where
     S: std::io::Read + std::io::Write,
 {
     use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
     let frame = stream.read_frame(capacity)?;
-    let query = Signal::<meta_signal_herdr_nexus::Query>::from(Vec::<u8>::from(frame)).restore()?;
+    let query = Signal::<core_meta_herdr_nexus::Query>::from(Vec::<u8>::from(frame)).restore()?;
     let response = match query {
-        meta_signal_herdr_nexus::Query::Configure(configuration) => {
-            meta_signal_herdr_nexus::Response::Configured(configure(configuration))
-        }
+        core_meta_herdr_nexus::Query::Configure(setting) => configure(setting),
     };
     stream.write_frame(&response.signalize()?, capacity)?;
     Ok(())
@@ -290,6 +286,10 @@ impl Dispatcher {
                         verb: Verb::AgentStart(AgentStart_Data {
                             pane_id: start.pane.pane_id.clone(),
                             command: start.command,
+                            timeout: emission_herdr_nexus::Timeout(
+                                i64::try_from(configuration.start_timeout.as_millis())
+                                    .expect("validated i64 millisecond timeout"),
+                            ),
                         }),
                     },
                 );
@@ -366,7 +366,7 @@ impl Dispatcher {
                 herdr_nexus_core::ExternalResult::Succeeded(()),
             ))
         };
-        let mut output = DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+        let mut output = DeadlineStream::new(stream.try_clone()?, configuration.transport_timeout)?;
         let mut hub = self
             .subscriptions
             .lock()
@@ -496,23 +496,15 @@ impl Dispatcher {
         use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let stream = std::os::unix::net::UnixStream::connect(&self.translator_socket)?;
-            let timeout = match &herdr.verb {
-                emission_herdr_nexus::Verb::AgentStart(_) => configuration.start_timeout,
-                _ => configuration.call_timeout,
-            };
-            let mut stream = DeadlineStream::new(stream, timeout)?;
-            let request =
-                emission_herdr_nexus::Query::Execute(emission_herdr_nexus::Execute_Data {
-                    configuration: configuration.source.clone(),
-                    herdr,
-                });
+            let mut stream = DeadlineStream::new(stream, configuration.transport_timeout)?;
+            let request = emission_herdr_nexus::Query::Emit(herdr);
             let capacity = signal::FrameCapacity::from(configuration.frame_capacity_bytes);
             stream.write_frame(&request.signalize()?, capacity)?;
             let body = stream.read_frame(capacity)?;
             let response =
                 Signal::<emission_herdr_nexus::Response>::from(Vec::<u8>::from(body)).restore()?;
             match response {
-                emission_herdr_nexus::Response::Executed(outcome) => Ok(outcome),
+                emission_herdr_nexus::Response::Emitted(outcome) => Ok(outcome),
             }
         })();
         result.unwrap_or(emission_herdr_nexus::ExternalOutcome::Uncertain)
@@ -545,7 +537,7 @@ fn write_subscription_change(
     change: &signal_herdr_nexus::Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use signal::{FrameWriting, Signalizable};
-    let mut output = DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+    let mut output = DeadlineStream::new(stream.try_clone()?, configuration.transport_timeout)?;
     output.write_frame(
         &change.signalize()?,
         signal::FrameCapacity::from(configuration.frame_capacity_bytes),
@@ -597,532 +589,103 @@ fn listed_result(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RuntimeConfiguration {
-    pub source: Configuration,
     pub polling: Duration,
-    pub call_timeout: Duration,
     pub start_timeout: Duration,
     pub frame_capacity_bytes: usize,
-    pub external_output_limit_bytes: usize,
+    pub transport_timeout: Duration,
+}
+
+#[derive(Clone, Default)]
+struct PartialConfiguration {
+    polling: Option<Duration>,
+    start_timeout: Option<Duration>,
+    frame_capacity_bytes: Option<usize>,
+    transport_timeout: Option<Duration>,
 }
 
 #[derive(Default)]
 pub struct ConfigurationStore {
+    partial: RwLock<PartialConfiguration>,
     current: RwLock<Option<Arc<RuntimeConfiguration>>>,
 }
 
 impl ConfigurationStore {
     pub fn configure(
         &self,
-        candidate: Configuration,
-        bind_public: impl FnOnce() -> Result<(), BootstrapRefusal>,
-    ) -> ConfigureOutcome {
-        match validate(candidate) {
-            Ok(validated) => {
-                let mut current = self
-                    .current
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if current.is_none() {
-                    if let Err(refusal) = bind_public() {
-                        return ConfigureOutcome::Unavailable(refusal);
-                    }
-                }
-                *current = Some(Arc::new(validated));
-                ConfigureOutcome::Succeeded
-            }
-            Err(errors) => ConfigureOutcome::Invalid(errors),
+        setting: core_meta_herdr_nexus::CoreSet,
+        bind_public: impl FnOnce() -> Result<(), meta_signal_herdr_nexus::BootstrapRefusal>,
+    ) -> core_meta_herdr_nexus::Response {
+        use core_meta_herdr_nexus::Response;
+        use meta_signal_herdr_nexus::{ConfigurationRefusal, Invalid_Data, Message, Owner, Readiness, SettingName};
+        let mut candidate = self.partial.read().unwrap_or_else(|p| p.into_inner()).clone();
+        let (name, valid) = match setting {
+            core_meta_herdr_nexus::CoreSet::StartTimeout(value) => (SettingName::StartTimeout, checked_duration(value.0).map(|value| candidate.start_timeout = Some(value)).is_some()),
+            core_meta_herdr_nexus::CoreSet::Polling(value) => (SettingName::Polling, checked_duration(value.0).map(|value| candidate.polling = Some(value)).is_some()),
+            core_meta_herdr_nexus::CoreSet::FrameCapacity(value) => (SettingName::FrameCapacity, usize::try_from(value.0).ok().filter(|value| (1..=signal::MAXIMUM_SIGNAL_BYTES).contains(value)).map(|value| candidate.frame_capacity_bytes = Some(value)).is_some()),
+            core_meta_herdr_nexus::CoreSet::TransportTimeout(value) => (SettingName::TransportTimeout, checked_duration(value.0).map(|value| candidate.transport_timeout = Some(value)).is_some()),
+        };
+        let cross_valid = match (candidate.transport_timeout, candidate.start_timeout) {
+            (Some(transport), Some(start)) => transport > start,
+            _ => true,
+        };
+        if !valid || !cross_valid {
+            return Response::ConfigureRefused(ConfigurationRefusal::Invalid(Invalid_Data {
+                owner: Owner::Nexus,
+                setting_name: name,
+                message: Message(if valid { "TransportTimeout must exceed StartTimeout" } else { "invalid setting value" }.into()),
+            }));
         }
+        let readiness = readiness(&candidate);
+        let validated = match (&candidate.polling, &candidate.start_timeout, &candidate.frame_capacity_bytes, &candidate.transport_timeout) {
+            (Some(polling), Some(start_timeout), Some(frame_capacity_bytes), Some(transport_timeout)) => Some(RuntimeConfiguration {
+                polling: *polling,
+                start_timeout: *start_timeout,
+                frame_capacity_bytes: *frame_capacity_bytes,
+                transport_timeout: *transport_timeout,
+            }),
+            _ => None,
+        };
+        if validated.is_some() && self.current.read().unwrap_or_else(|p| p.into_inner()).is_none() {
+            if let Err(refusal) = bind_public() {
+                return Response::ConfigureRefused(ConfigurationRefusal::Unavailable(refusal));
+            }
+        }
+        *self.partial.write().unwrap_or_else(|p| p.into_inner()) = candidate;
+        if let Some(validated) = validated {
+            *self.current.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(validated));
+        }
+        Response::Configured(readiness)
     }
 
-    /// Captures the one immutable configuration an in-flight attempt uses.
     pub fn snapshot(&self) -> Option<Arc<RuntimeConfiguration>> {
-        self.current
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.current.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 }
 
-fn validate(candidate: Configuration) -> Result<RuntimeConfiguration, Vec<ConfigurationError>> {
-    let mut errors = Vec::new();
-    if candidate.herdr_executable.0.is_empty() {
-        errors.push(ConfigurationError::EmptyExecutable);
-    }
-    let polling = checked_duration(candidate.polling_milliseconds.0).or_else(|| {
-        errors.push(ConfigurationError::PollingOutOfRange(
-            candidate.polling_milliseconds.clone(),
-        ));
-        None
-    });
-    let call_timeout = checked_duration(candidate.call_timeout_milliseconds.0).or_else(|| {
-        errors.push(ConfigurationError::CallTimeoutOutOfRange(
-            candidate.call_timeout_milliseconds.clone(),
-        ));
-        None
-    });
-    let start_timeout = checked_duration(candidate.start_timeout_milliseconds.0).or_else(|| {
-        errors.push(ConfigurationError::StartTimeoutOutOfRange(
-            candidate.start_timeout_milliseconds.clone(),
-        ));
-        None
-    });
-    let frame_capacity_bytes = usize::try_from(candidate.frame_capacity_bytes.0)
-        .ok()
-        .filter(|capacity| (1..=signal::MAXIMUM_SIGNAL_BYTES).contains(capacity))
-        .or_else(|| {
-            errors.push(ConfigurationError::FrameCapacityOutOfRange(
-                candidate.frame_capacity_bytes.clone(),
-            ));
-            None
-        });
-    let external_output_limit_bytes = usize::try_from(candidate.external_output_limit_bytes.0)
-        .ok()
-        .filter(|limit| *limit > 0)
-        .or_else(|| {
-            errors.push(ConfigurationError::ExternalOutputLimitOutOfRange(
-                candidate.external_output_limit_bytes.clone(),
-            ));
-            None
-        });
-    if !errors.is_empty() {
-        return Err(errors);
-    }
-    Ok(RuntimeConfiguration {
-        source: candidate,
-        polling: polling.expect("validated polling duration"),
-        call_timeout: call_timeout.expect("validated call timeout"),
-        start_timeout: start_timeout.expect("validated start timeout"),
-        frame_capacity_bytes: frame_capacity_bytes.expect("validated frame capacity"),
-        external_output_limit_bytes: external_output_limit_bytes
-            .expect("validated external output limit"),
-    })
+fn readiness(candidate: &PartialConfiguration) -> meta_signal_herdr_nexus::Readiness {
+    use meta_signal_herdr_nexus::{Readiness, SettingName};
+    let mut awaiting = Vec::new();
+    if candidate.start_timeout.is_none() { awaiting.push(SettingName::StartTimeout); }
+    if candidate.polling.is_none() { awaiting.push(SettingName::Polling); }
+    if candidate.frame_capacity_bytes.is_none() { awaiting.push(SettingName::FrameCapacity); }
+    if candidate.transport_timeout.is_none() { awaiting.push(SettingName::TransportTimeout); }
+    if awaiting.is_empty() { Readiness::Ready } else { Readiness::Awaiting(awaiting) }
 }
 
 fn checked_duration(milliseconds: i64) -> Option<Duration> {
     let duration = Duration::from_millis(u64::try_from(milliseconds).ok()?);
-    if duration.is_zero() || Instant::now().checked_add(duration).is_none() {
-        None
-    } else {
-        Some(duration)
-    }
+    if duration.is_zero() || Instant::now().checked_add(duration).is_none() { None } else { Some(duration) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meta_signal_herdr_nexus::{
-        CallTimeoutMilliseconds, ExternalOutputLimitBytes, FrameCapacityBytes, HerdrExecutable,
-        PollingMilliseconds, StartTimeoutMilliseconds,
-    };
-    use signal::{
-        ByteViewable, FrameCapacity, FrameReading, FrameWriting, Restorable, Signal, Signalizable,
-    };
-    use std::io::{Cursor, Read, Write};
-
-    fn test_place(name: &str) -> (shared_translator::placement::Place, std::path::PathBuf) {
-        let directory = std::env::temp_dir().join(format!(
-            "herdr-nexus-{name}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock")
-                .as_nanos()
-        ));
-        std::fs::create_dir(&directory).expect("create owned test directory");
-        (
-            shared_translator::placement::Place {
-                metaflow_name: shared_translator::placement::MetaflowName(name.into()),
-                directory: shared_translator::placement::Directory(directory.display().to_string()),
-            },
-            directory,
-        )
-    }
-
-    struct Duplex {
-        input: Cursor<Vec<u8>>,
-        output: Vec<u8>,
-    }
-
-    impl Read for Duplex {
-        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-            self.input.read(buffer)
-        }
-    }
-
-    impl Write for Duplex {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.output.write(buffer)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn configuration(polling: i64) -> Configuration {
-        Configuration {
-            herdr_executable: HerdrExecutable("/run/current-system/sw/bin/herdr".into()),
-            polling_milliseconds: PollingMilliseconds(polling),
-            call_timeout_milliseconds: CallTimeoutMilliseconds(30_000),
-            start_timeout_milliseconds: StartTimeoutMilliseconds(60_000),
-            frame_capacity_bytes: FrameCapacityBytes(signal::MAXIMUM_SIGNAL_BYTES as i64),
-            external_output_limit_bytes: ExternalOutputLimitBytes(1024 * 1024),
-        }
-    }
 
     #[test]
-    fn absolute_deadline_stops_a_drip_fed_partial_read() {
-        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
-        let sender = std::thread::spawn(move || {
-            for byte in [1_u8, 2, 3, 4] {
-                if writer.write_all(&[byte]).is_err() {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(30));
-            }
-        });
-        let mut reader =
-            DeadlineStream::new(reader, Duration::from_millis(50)).expect("representable deadline");
-        let mut bytes = [0_u8; 4];
-        let error = reader
-            .read_exact(&mut bytes)
-            .expect_err("drip must not extend the absolute deadline");
-        assert!(matches!(
-            error.kind(),
-            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
-        ));
-        sender.join().expect("sender");
-    }
-
-    #[test]
-    fn one_shared_subscription_source_delivers_dead_once_and_reappearance() {
-        use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
-        use signal_herdr_nexus::{
-            Changed_Data, ErrorCode, Label, Message, Outcome, Pane, PaneId, Refusal, Response,
-            Root, Session, State, Workspace,
-        };
-        let (place, directory) = test_place("subscription");
-        let paths = SocketPaths::from(&place);
-        let dispatcher = Arc::new(Dispatcher::new(&paths));
-        let pane = Pane {
-            session: Session("subscription".into()),
-            pane_id: PaneId("w1:p1".into()),
-        };
-        let other = Pane {
-            session: Session("other".into()),
-            pane_id: PaneId("w2:p1".into()),
-        };
-        {
-            let mut core = dispatcher.core.lock().expect("core");
-            for owned in [&pane, &other] {
-                let workspace = Workspace {
-                    session: owned.session.clone(),
-                    root: Root(directory.display().to_string()),
-                    variable_vector: vec![],
-                };
-                assert!(matches!(
-                    core.create(
-                        workspace,
-                        herdr_nexus_core::ExternalResult::Succeeded(owned.clone())
-                    ),
-                    Outcome::Created(_)
-                ));
-                assert_eq!(
-                    core.start(
-                        owned.clone(),
-                        Label(format!("label-{}", owned.session.0)),
-                        herdr_nexus_core::ExternalResult::Succeeded(())
-                    ),
-                    Outcome::Done
-                );
-            }
-        }
-        let listener = std::os::unix::net::UnixListener::bind(&paths.translator)
-            .expect("bind translator fixture");
-        let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
-        let target = pane.clone();
-        let unrelated = other.clone();
-        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let fixture_poll_count = Arc::clone(&poll_count);
-        let fixture = std::thread::spawn(move || {
-            let outcomes = [
-                ExternalOutcome::Listed(vec![
-                    PaneObservation {
-                        pane: target.clone(),
-                        state: State::Idle,
-                    },
-                    PaneObservation {
-                        pane: unrelated.clone(),
-                        state: State::Busy,
-                    },
-                ]),
-                ExternalOutcome::Uncertain,
-                ExternalOutcome::Refused(Refusal {
-                    error_code: ErrorCode("temporary_list_refusal".into()),
-                    exit_status_option: None,
-                    message: Message("fixture refusal".into()),
-                }),
-                ExternalOutcome::Listed(vec![PaneObservation {
-                    pane: unrelated.clone(),
-                    state: State::Idle,
-                }]),
-                ExternalOutcome::Listed(vec![PaneObservation {
-                    pane: unrelated,
-                    state: State::Busy,
-                }]),
-                ExternalOutcome::Listed(vec![PaneObservation {
-                    pane: target,
-                    state: State::Idle,
-                }]),
-            ];
-            for outcome in outcomes {
-                let (mut stream, _) = listener.accept().expect("accept list attempt");
-                let _ = stream.read_frame(capacity).expect("read list attempt");
-                stream
-                    .write_frame(
-                        &emission_herdr_nexus::Response::Executed(outcome)
-                            .signalize()
-                            .expect("archive outcome"),
-                        capacity,
-                    )
-                    .expect("write list outcome");
-                fixture_poll_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-        });
-        let configuration = Arc::new(validate(configuration(50)).expect("valid configuration"));
-        let (server_one, mut client_one) =
-            std::os::unix::net::UnixStream::pair().expect("first subscriber pair");
-        let (server_two, mut client_two) =
-            std::os::unix::net::UnixStream::pair().expect("second subscriber pair");
-        for client in [&client_one, &client_two] {
-            client
-                .set_read_timeout(Some(Duration::from_secs(3)))
-                .expect("client timeout");
-        }
-        Arc::clone(&dispatcher)
-            .subscribe(
-                server_one,
-                Session("subscription".into()),
-                Arc::clone(&configuration),
-            )
-            .expect("register first subscriber");
-        Arc::clone(&dispatcher)
-            .subscribe(server_two, Session("subscription".into()), configuration)
-            .expect("register second subscriber");
-        assert_eq!(dispatcher.subscription_source_count(), 1);
-        let read_response = |stream: &mut std::os::unix::net::UnixStream| {
-            let body = stream
-                .read_frame(capacity)
-                .expect("read subscription frame");
-            Signal::<Response>::from(Vec::<u8>::from(body))
-                .restore()
-                .expect("restore subscription frame")
-        };
-        for client in [&mut client_one, &mut client_two] {
-            assert_eq!(read_response(client), Response::Subscribed(Outcome::Done));
-        }
-        for client in [&mut client_one, &mut client_two] {
-            assert_eq!(
-                read_response(client),
-                Response::Changed(Changed_Data {
-                    pane: pane.clone(),
-                    state: State::Dead,
-                })
-            );
-        }
-        assert!(poll_count.load(std::sync::atomic::Ordering::SeqCst) >= 4);
-        for client in [&mut client_one, &mut client_two] {
-            assert_eq!(
-                read_response(client),
-                Response::Changed(Changed_Data {
-                    pane: pane.clone(),
-                    state: State::Idle,
-                })
-            );
-        }
-        fixture.join().expect("translator fixture");
-        assert_eq!(poll_count.load(std::sync::atomic::Ordering::SeqCst), 6);
-        drop(client_one);
-        drop(client_two);
-        for _ in 0..40 {
-            if dispatcher.subscription_source_count() == 0 {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        assert_eq!(dispatcher.subscription_source_count(), 0);
-        drop(dispatcher);
-        std::fs::remove_file(&paths.translator).expect("remove fixture socket");
-        std::fs::remove_dir(directory).expect("remove fixture directory");
-    }
-
-    fn configure(store: &ConfigurationStore, candidate: Configuration) -> ConfigureOutcome {
-        store.configure(candidate, || Ok(()))
-    }
-
-    #[test]
-    fn valid_candidate_becomes_one_snapshot() {
+    fn transport_timeout_must_exceed_start_timeout() {
         let store = ConfigurationStore::default();
-        assert_eq!(
-            configure(&store, configuration(750)),
-            ConfigureOutcome::Succeeded
-        );
-        assert_eq!(
-            store.snapshot().expect("configured").polling,
-            Duration::from_millis(750)
-        );
-    }
-
-    #[test]
-    fn invalid_candidate_leaves_previous_configuration_whole() {
-        let store = ConfigurationStore::default();
-        assert_eq!(
-            configure(&store, configuration(750)),
-            ConfigureOutcome::Succeeded
-        );
-        let before = store.snapshot().expect("configured");
-        let invalid = configure(&store, configuration(0));
-        assert!(matches!(invalid, ConfigureOutcome::Invalid(_)));
-        let after = store.snapshot().expect("still configured");
-        assert!(Arc::ptr_eq(&before, &after));
-    }
-
-    #[test]
-    fn an_attempt_keeps_its_captured_snapshot_after_reconfiguration() {
-        let store = ConfigurationStore::default();
-        configure(&store, configuration(750));
-        let in_flight = store.snapshot().expect("first configuration");
-        configure(&store, configuration(1_500));
-        assert_eq!(in_flight.polling, Duration::from_millis(750));
-        assert_eq!(
-            store.snapshot().expect("second configuration").polling,
-            Duration::from_millis(1_500)
-        );
-    }
-
-    #[test]
-    fn framed_meta_request_validates_and_atomically_configures() {
-        let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
-        let query = meta_signal_herdr_nexus::Query::Configure(configuration(750));
-        let query_signal = query.signalize().expect("archive query");
-        let mut input = Vec::new();
-        input
-            .write_frame(&query_signal, capacity)
-            .expect("frame query");
-        let mut duplex = Duplex {
-            input: Cursor::new(input),
-            output: Vec::new(),
-        };
-        let store = ConfigurationStore::default();
-
-        serve_meta_once(&mut duplex, capacity, |candidate| {
-            configure(&store, candidate)
-        })
-        .expect("serve meta request");
-
-        let body = Cursor::new(duplex.output)
-            .read_frame(capacity)
-            .expect("read response");
-        let response = Signal::<meta_signal_herdr_nexus::Response>::from(body.bytes().to_vec())
-            .restore()
-            .expect("restore response");
-        assert_eq!(
-            response,
-            meta_signal_herdr_nexus::Response::Configured(ConfigureOutcome::Succeeded)
-        );
-        assert!(store.snapshot().is_some());
-    }
-
-    #[test]
-    fn public_socket_appears_only_after_first_valid_configuration() {
-        let (place, directory) = test_place("gated");
-        let bootstrap = Bootstrap::bind(&place).expect("bind meta socket");
-        assert!(bootstrap.paths().meta.exists());
-        assert!(!bootstrap.paths().public.exists());
-
-        assert_eq!(
-            bootstrap.configure(configuration(750)),
-            ConfigureOutcome::Succeeded
-        );
-        assert!(bootstrap.paths().public.exists());
-        drop(bootstrap);
-        assert!(!directory.join(META_SOCKET_NAME).exists());
-        assert!(!directory.join(PUBLIC_SOCKET_NAME).exists());
-        std::fs::remove_dir(directory).expect("remove owned test directory");
-    }
-
-    #[test]
-    fn occupied_public_socket_is_typed_failure_and_leaves_unconfigured() {
-        let (place, directory) = test_place("occupied");
-        let bootstrap = Bootstrap::bind(&place).expect("bind meta socket");
-        let occupied = std::os::unix::net::UnixListener::bind(&bootstrap.paths().public)
-            .expect("occupy public path");
-
-        let outcome = bootstrap.configure(configuration(750));
-        assert!(matches!(outcome, ConfigureOutcome::Unavailable(_)));
-        assert!(bootstrap.snapshot().is_none());
-
-        drop(occupied);
-        std::fs::remove_file(&bootstrap.paths().public).expect("remove owned occupied socket");
-        drop(bootstrap);
-        std::fs::remove_dir(directory).expect("remove owned test directory");
-    }
-
-    #[test]
-    fn public_create_crosses_typed_emission_socket_and_enters_owned_memory() {
-        use signal_herdr_nexus::{
-            Name, Outcome, Pane, PaneId, Query as PublicQuery, Response as PublicResponse, Root,
-            Session, Value, Variable, Workspace,
-        };
-        let (place, directory) = test_place("dispatch");
-        let bootstrap = Bootstrap::bind(&place).expect("bind meta socket");
-        assert_eq!(
-            bootstrap.configure(configuration(750)),
-            ConfigureOutcome::Succeeded
-        );
-        let listener = std::os::unix::net::UnixListener::bind(&bootstrap.paths().translator)
-            .expect("bind owned translator fixture");
-        let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
-        let fixture = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept emission");
-            let body = stream.read_frame(capacity).expect("read execute");
-            let query = Signal::<emission_herdr_nexus::Query>::from(Vec::<u8>::from(body))
-                .restore()
-                .expect("restore execute");
-            let pane = match query {
-                emission_herdr_nexus::Query::Execute(execute) => Pane {
-                    session: execute.herdr.session,
-                    pane_id: PaneId("owned:p1".into()),
-                },
-            };
-            let response = emission_herdr_nexus::Response::Executed(
-                emission_herdr_nexus::ExternalOutcome::Created(pane),
-            );
-            stream
-                .write_frame(&response.signalize().expect("archive response"), capacity)
-                .expect("write response");
-        });
-        let dispatcher = Dispatcher::new(bootstrap.paths());
-        let workspace = Workspace {
-            session: Session("dispatch".into()),
-            root: Root(directory.display().to_string()),
-            variable_vector: vec![Variable {
-                name: Name("FLOW_ID".into()),
-                value: Value("af8fe3".into()),
-            }],
-        };
-        let response = dispatcher.dispatch(
-            PublicQuery::Create(workspace),
-            bootstrap.snapshot().expect("configured snapshot"),
-        );
-        assert!(matches!(
-            response,
-            PublicResponse::Created(Outcome::Created(_))
-        ));
-        fixture.join().expect("translator fixture");
-        std::fs::remove_file(&bootstrap.paths().translator)
-            .expect("remove owned translator fixture socket");
-        drop(bootstrap);
-        std::fs::remove_dir(directory).expect("remove owned test directory");
+        let _ = store.configure(core_meta_herdr_nexus::CoreSet::StartTimeout(meta_signal_herdr_nexus::Timeout(50)), || Ok(()));
+        let response = store.configure(core_meta_herdr_nexus::CoreSet::TransportTimeout(meta_signal_herdr_nexus::Timeout(50)), || Ok(()));
+        assert!(matches!(response, core_meta_herdr_nexus::Response::ConfigureRefused(_)));
     }
 }

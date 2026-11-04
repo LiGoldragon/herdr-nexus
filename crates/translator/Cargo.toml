@@ -7,13 +7,16 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-nix = { version = "0.30", features = ["fs", "process", "signal"] }
+libc = "0.2"
+nix = { version = "0.30", features = ["fs", "process", "signal", "socket"] }
+rkyv = { version = "0.8", features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d90ff185d54bc0007b19a8d9bc390c6bfeb12", optional = true }
 
 [dependencies.signal-herdr-nexus]
 git = "https://github.com/LiGoldragon/signal-herdr-nexus"
-rev = "2a6c8883bb9ce1ac9467c359bd323c3aa895d580"
+rev = "771960c643cc63b5280919cdaad059944a7a048d"
 
 [dependencies.shared-translator]
 package = "translator"
@@ -23,7 +26,8 @@ rev = "c38b0529437ae452c7047c6ace920c58e4c1f0fc"
 
 [features]
 default = []
-text = ["dep:protos", "dep:datom-codec", "signal-herdr-nexus/datom", "shared-translator/text"]
+text = ["datom", "dep:protos", "dep:datom-codec", "signal-herdr-nexus/datom", "shared-translator/text"]
+datom = []
 
 
 [dependencies.emission-herdr-nexus]
@@ -32,7 +36,7 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "0e3c7abee1c2939793b88ca6a39b991b2a17de64"
+rev = "b786f020c4fdcc884405dfad4cd74d5b56ff08a5"
 features = ["datom"]
 
 [[bin]]
@@ -46,4 +50,9 @@ required-features = ["text"]
 [[bin]]
 name = "herdr-nexus-place"
 path = "src/bin/herdr-nexus-place.rs"
+required-features = ["text"]
+
+[[bin]]
+name = "herdr-translator"
+path = "src/bin/herdr-translator.rs"
 required-features = ["text"]

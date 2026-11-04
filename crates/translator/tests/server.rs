@@ -2,11 +2,8 @@ use emission_herdr_nexus::{
     AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data, Verb,
     WorkspaceCreate_Data,
 };
-use herdr_nexus_translator::server::execute;
-use meta_signal_herdr_nexus::{
-    CallTimeoutMilliseconds, Configuration, ExternalOutputLimitBytes, FrameCapacityBytes,
-    HerdrExecutable, PollingMilliseconds, StartTimeoutMilliseconds,
-};
+use herdr_nexus_translator::server::{execute, Runtime};
+use emission_herdr_nexus::Timeout;
 use signal_herdr_nexus::{
     AgentKind, AgentName, Command, Executable, Keys, Name, PaneId, Program, Root, Session, State,
     Text, Value, Variable,
@@ -52,15 +49,12 @@ impl Fixture {
         }
     }
 
-    fn configuration(&self) -> Configuration {
-        Configuration {
-            herdr_executable: HerdrExecutable(self.executable.display().to_string()),
-            polling_milliseconds: PollingMilliseconds(1),
-            call_timeout_milliseconds: CallTimeoutMilliseconds(5_000),
-            start_timeout_milliseconds: StartTimeoutMilliseconds(5_000),
-            frame_capacity_bytes: FrameCapacityBytes(8 * 1024 * 1024),
-            external_output_limit_bytes: ExternalOutputLimitBytes(64 * 1024),
-        }
+    fn runtime(&self) -> Runtime {
+        Runtime::new(
+            self.executable.clone(),
+            std::time::Duration::from_millis(5_000),
+            64 * 1024,
+        ).expect("valid runtime fixture")
     }
 
     fn arguments(&self) -> Vec<String> {
@@ -117,10 +111,10 @@ esac
 #[test]
 fn production_execute_covers_every_external_verb_and_exact_argv() {
     let fixture = Fixture::new(SUCCESS_SCRIPT);
-    let configuration = fixture.configuration();
+    let runtime = fixture.runtime();
 
     let created = execute(
-        &configuration,
+        &runtime,
         &herdr(Verb::WorkspaceCreate(WorkspaceCreate_Data {
             root: Root("/work with space".into()),
             variable_vector: vec![Variable {
@@ -145,7 +139,7 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
     );
 
     let started = execute(
-        &configuration,
+        &runtime,
         &herdr(Verb::AgentStart(AgentStart_Data {
             pane_id: PaneId("w:p".into()),
             command: Command {
@@ -154,9 +148,10 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
                 executable: Executable::Explicit(Program("/opt/codex".into())),
                 string_vector: vec!["--model".into(), "x y".into()],
             },
+            timeout: Timeout(5_000),
         })),
     );
-    assert_eq!(started, ExternalOutcome::Done);
+    assert_eq!(started, ExternalOutcome::Started(State::Idle));
     assert_eq!(
         fixture.arguments(),
         [
@@ -181,7 +176,7 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
 
     assert_eq!(
         execute(
-            &configuration,
+            &runtime,
             &herdr(Verb::AgentPrompt(AgentPrompt_Data {
                 pane_id: PaneId("w:p".into()),
                 text: Text("hello there".into()),
@@ -196,7 +191,7 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
 
     assert_eq!(
         execute(
-            &configuration,
+            &runtime,
             &herdr(Verb::Keys(Keys_Data {
                 pane_id: PaneId("w:p".into()),
                 keys: Keys(vec!["ctrl-c".into(), "x y".into()]),
@@ -219,13 +214,13 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
 
     assert_eq!(
         execute(
-            &configuration,
+            &runtime,
             &herdr(Verb::PaneClose(PaneId("w:p".into()))),
         ),
         ExternalOutcome::Done
     );
 
-    let ExternalOutcome::Listed(snapshot) = execute(&configuration, &herdr(Verb::PaneList)) else {
+    let ExternalOutcome::Listed(snapshot) = execute(&runtime, &herdr(Verb::PaneList)) else {
         panic!("complete list expected");
     };
     assert_eq!(snapshot.len(), 1);
@@ -240,7 +235,7 @@ fn production_execute_preserves_symbolic_refusal_and_process_status() {
 exit 7"#,
     );
     let outcome = execute(
-        &fixture.configuration(),
+        &fixture.runtime(),
         &herdr(Verb::PaneClose(PaneId("w:p".into()))),
     );
     let ExternalOutcome::Refused(refusal) = outcome else {

@@ -2,6 +2,8 @@
 
 pub mod runner;
 pub mod server;
+pub mod transport;
+pub mod transport_types;
 
 use shared_translator::FrameCapacity;
 
@@ -41,19 +43,15 @@ impl Client {
             .map_err(|error| ClientError::Signal(format!("{error:?}")))
     }
 
-    pub fn execute(
+    pub fn emit(
         &self,
-        configuration: meta_signal_herdr_nexus::Configuration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> Result<emission_herdr_nexus::ExternalOutcome, ClientError> {
-        use emission_herdr_nexus::{Execute_Data, Query, Response};
+        use emission_herdr_nexus::{Query, Response};
         use shared_translator::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
         use std::os::unix::net::UnixStream;
         let mut stream = UnixStream::connect(&self.socket).map_err(ClientError::Io)?;
-        let request = Query::Execute(Execute_Data {
-            configuration,
-            herdr,
-        });
+        let request = Query::Emit(herdr);
         let signal = request
             .signalize()
             .map_err(|error| ClientError::Signal(format!("{error:?}")))?;
@@ -67,7 +65,7 @@ impl Client {
             .restore()
             .map_err(|error| ClientError::Signal(format!("{error:?}")))?;
         match response {
-            Response::Executed(outcome) => Ok(outcome),
+            Response::Emitted(outcome) => Ok(outcome),
         }
     }
 

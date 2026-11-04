@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 herdr-nexus-core = { path = "../core" }
 emission-herdr-nexus = { path = "../emission" }
+core-meta-herdr-nexus = { path = "../core-meta" }
 signal-herdr-nexus.workspace = true
 meta-signal-herdr-nexus.workspace = true
 signal = { workspace = true, features = ["transport"] }

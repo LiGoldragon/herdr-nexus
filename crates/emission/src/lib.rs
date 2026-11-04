@@ -14,6 +14,10 @@ pub struct Herdr {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Timeout(pub i64);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct WorkspaceCreate_Data {
     pub root: signal_herdr_nexus::Root,
     pub variable_vector: std::vec::Vec<signal_herdr_nexus::Variable>,
@@ -24,6 +28,7 @@ pub struct WorkspaceCreate_Data {
 pub struct AgentStart_Data {
     pub pane_id: signal_herdr_nexus::PaneId,
     pub command: signal_herdr_nexus::Command,
+    pub timeout: Timeout,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -62,6 +67,7 @@ pub struct PaneObservation {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum ExternalOutcome {
     Done,
+    Started(signal_herdr_nexus::State),
     Created(signal_herdr_nexus::Pane),
     Listed(std::vec::Vec<PaneObservation>),
     Refused(signal_herdr_nexus::Refusal),
@@ -70,24 +76,17 @@ pub enum ExternalOutcome {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Execute_Data {
-    pub configuration: meta_signal_herdr_nexus::Configuration,
-    pub herdr: Herdr,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Query {
-    Execute(Execute_Data),
+    Emit(Herdr),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Response {
-    Executed(ExternalOutcome),
+    Emitted(ExternalOutcome),
 }
 
-/// The temporary Signal-root stand-in for the Emission contract.
+/// The temporary Signal-root Emission contract source.
 pub const ETHOS: &str = include_str!("../../../ethos/emission.ethos");
 
 impl signal::Contracted for Query {

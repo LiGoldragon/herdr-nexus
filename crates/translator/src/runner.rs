@@ -22,7 +22,6 @@ pub enum RunError {
     Spawn(std::io::Error),
     Pipe(std::io::Error),
     Wait(std::io::Error),
-    PollingInterval,
     Deadline,
     OutputLimit,
 }
@@ -44,12 +43,8 @@ pub fn run(
     executable: &Path,
     arguments: &[OsString],
     deadline: Instant,
-    polling_interval: Duration,
     output_limit: usize,
 ) -> Result<Captured, RunError> {
-    if polling_interval.is_zero() {
-        return Err(RunError::PollingInterval);
-    }
     let mut command = Command::new(executable);
     command
         .args(arguments)
@@ -140,10 +135,39 @@ pub fn run(
             return Err(RunError::Deadline);
         }
         if !progressed {
-            std::thread::sleep(
-                polling_interval.min(deadline.saturating_duration_since(Instant::now())),
-            );
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            wait_for_output(&stdout, &stderr, out_open, err_open, remaining)
+                .map_err(RunError::Pipe)?;
         }
+    }
+}
+
+fn wait_for_output(
+    stdout: &impl std::os::fd::AsRawFd,
+    stderr: &impl std::os::fd::AsRawFd,
+    stdout_open: bool,
+    stderr_open: bool,
+    remaining: Duration,
+) -> std::io::Result<()> {
+    let mut descriptors = [
+        libc::pollfd {
+            fd: stdout.as_raw_fd(),
+            events: if stdout_open { libc::POLLIN | libc::POLLHUP } else { 0 },
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: stderr.as_raw_fd(),
+            events: if stderr_open { libc::POLLIN | libc::POLLHUP } else { 0 },
+            revents: 0,
+        },
+    ];
+    let milliseconds = remaining.as_millis().min(i32::MAX as u128) as i32;
+    // SAFETY: `descriptors` is a valid mutable array for the duration of this call.
+    let result = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, milliseconds) };
+    if result < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 

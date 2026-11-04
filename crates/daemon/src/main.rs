@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let capacity = FrameCapacity::from(configuration.frame_capacity_bytes);
                 let mut input = herdr_nexus_daemon::DeadlineStream::new(
                     stream.try_clone()?,
-                    configuration.call_timeout,
+                    configuration.transport_timeout,
                 )?;
                 let body = input.read_frame(capacity)?;
                 let query =
@@ -43,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let response = dispatcher.dispatch(query, Arc::clone(&configuration));
                 let mut output =
-                    herdr_nexus_daemon::DeadlineStream::new(stream, configuration.call_timeout)?;
+                    herdr_nexus_daemon::DeadlineStream::new(stream, configuration.transport_timeout)?;
                 output.write_frame(&response.signalize()?, capacity)?;
                 Ok(())
             })();

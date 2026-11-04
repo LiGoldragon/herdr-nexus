@@ -1,0 +1,199 @@
+use crate::transport_types::{Caller, GroupId, Kind, Lane, ProcessId, UserId};
+use std::io::{Read, Write};
+
+pub const HEADER_BYTES: usize = 2;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub lane: Lane,
+    pub kind: Kind,
+    pub payload: Vec<u8>,
+}
+
+impl Frame {
+    pub fn text(&self) -> Result<&str, TransportError> {
+        match self.lane {
+            Lane::PublicText | Lane::MetaText => {
+                std::str::from_utf8(&self.payload).map_err(|_| TransportError::InvalidUtf8)
+            }
+            Lane::EmissionSignal => Err(TransportError::WrongLane),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum TransportError {
+    Io(std::io::Error),
+    InvalidLimit,
+    InvalidLength,
+    TooLarge,
+    UnknownLane(u8),
+    UnknownKind(u8),
+    InvalidUtf8,
+    WrongLane,
+    PeerCredential(String),
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "herdr transport error: {self:?}")
+    }
+}
+
+impl std::error::Error for TransportError {}
+
+impl From<std::io::Error> for TransportError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+pub fn read_frame(input: &mut impl Read, admission_limit: usize) -> Result<Frame, TransportError> {
+    validate_limit(admission_limit)?;
+    let mut prefix = [0_u8; 4];
+    input.read_exact(&mut prefix)?;
+    let total =
+        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::InvalidLength)?;
+    if total < HEADER_BYTES {
+        return Err(TransportError::InvalidLength);
+    }
+    if total > admission_limit {
+        return Err(TransportError::TooLarge);
+    }
+    let mut body = vec![0_u8; total];
+    input.read_exact(&mut body)?;
+    let lane = decode_lane(body[0])?;
+    let kind = decode_kind(body[1])?;
+    let frame = Frame {
+        lane,
+        kind,
+        payload: body.split_off(HEADER_BYTES),
+    };
+    if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
+        frame.text()?;
+    }
+    Ok(frame)
+}
+
+pub fn write_frame(
+    output: &mut impl Write,
+    frame: &Frame,
+    admission_limit: usize,
+) -> Result<(), TransportError> {
+    validate_limit(admission_limit)?;
+    if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
+        frame.text()?;
+    }
+    let total = frame
+        .payload
+        .len()
+        .checked_add(HEADER_BYTES)
+        .ok_or(TransportError::TooLarge)?;
+    if total > admission_limit {
+        return Err(TransportError::TooLarge);
+    }
+    let total = u32::try_from(total).map_err(|_| TransportError::TooLarge)?;
+    output.write_all(&total.to_be_bytes())?;
+    output.write_all(&[encode_lane(&frame.lane), encode_kind(&frame.kind)])?;
+    output.write_all(&frame.payload)?;
+    output.flush()?;
+    Ok(())
+}
+
+pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<Caller, TransportError> {
+    let credentials = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
+        .map_err(|error| TransportError::PeerCredential(error.to_string()))?;
+    Ok(Caller {
+        user_id: UserId(i64::from(credentials.uid())),
+        group_id: GroupId(i64::from(credentials.gid())),
+        process_id: ProcessId(i64::from(credentials.pid())),
+    })
+}
+
+fn validate_limit(limit: usize) -> Result<(), TransportError> {
+    if (HEADER_BYTES..=signal::MAXIMUM_SIGNAL_BYTES).contains(&limit) {
+        Ok(())
+    } else {
+        Err(TransportError::InvalidLimit)
+    }
+}
+
+fn decode_lane(value: u8) -> Result<Lane, TransportError> {
+    match value {
+        1 => Ok(Lane::PublicText),
+        2 => Ok(Lane::MetaText),
+        3 => Ok(Lane::EmissionSignal),
+        other => Err(TransportError::UnknownLane(other)),
+    }
+}
+
+fn encode_lane(lane: &Lane) -> u8 {
+    match lane {
+        Lane::PublicText => 1,
+        Lane::MetaText => 2,
+        Lane::EmissionSignal => 3,
+    }
+}
+
+fn decode_kind(value: u8) -> Result<Kind, TransportError> {
+    match value {
+        0 => Ok(Kind::Request),
+        1 => Ok(Kind::Answered),
+        2 => Ok(Kind::Failed),
+        other => Err(TransportError::UnknownKind(other)),
+    }
+}
+
+fn encode_kind(kind: &Kind) -> u8 {
+    match kind {
+        Kind::Request => 0,
+        Kind::Answered => 1,
+        Kind::Failed => 2,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn total_length_includes_lane_and_kind() {
+        let frame = Frame {
+            lane: Lane::PublicText,
+            kind: Kind::Request,
+            payload: b"List.main".to_vec(),
+        };
+        let mut bytes = Vec::new();
+        write_frame(&mut bytes, &frame, 128).expect("write");
+        assert_eq!(u32::from_be_bytes(bytes[..4].try_into().unwrap()), 11);
+        assert_eq!(read_frame(&mut Cursor::new(bytes), 128).unwrap(), frame);
+    }
+
+    #[test]
+    fn rejects_oversize_before_reading_body() {
+        let mut bytes = Cursor::new((129_u32).to_be_bytes().to_vec());
+        assert!(matches!(
+            read_frame(&mut bytes, 128),
+            Err(TransportError::TooLarge)
+        ));
+    }
+
+    #[test]
+    fn text_lane_requires_utf8_and_unknown_lane_is_not_guessed() {
+        let invalid_text = Frame {
+            lane: Lane::PublicText,
+            kind: Kind::Request,
+            payload: vec![0xff],
+        };
+        assert!(matches!(
+            write_frame(&mut Vec::new(), &invalid_text, 128),
+            Err(TransportError::InvalidUtf8)
+        ));
+        let mut unknown = vec![0, 0, 0, 2, 9, 0];
+        assert!(matches!(
+            read_frame(&mut Cursor::new(&mut unknown), 128),
+            Err(TransportError::UnknownLane(9))
+        ));
+    }
+}

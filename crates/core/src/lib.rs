@@ -3,6 +3,8 @@
 //! The proof-of-concept Memory is deliberately process-lifetime and
 //! nondurable. External execution and textualization live outside this crate.
 
+pub mod generated;
+
 use emission_herdr_nexus::PaneObservation;
 use signal_herdr_nexus::{
     Known, Label, MemoryRefusal, ObservedEffect, Outcome, Pane, Refusal, Session, State,

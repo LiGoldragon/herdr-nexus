@@ -1,0 +1,11 @@
+Library
+[]                                                    ; imports
+[ UserId.Integer                                      ; types
+  GroupId.Integer
+  ProcessId.Integer
+  Caller.{ UserId GroupId ProcessId }
+  Lane.[ PublicText MetaText EmissionSignal ]
+  Kind.[ Request Answered Failed ]
+  Failure.String ]
+[]                                                    ; traits
+[]                                                    ; associations
