@@ -7,7 +7,7 @@ starts. Its exit trap closes those resources and prints their identities.
 Validated candidate:
 
 ```
-/nix/store/brympvai7ri0vb8q4bnjbfy133cfjqw4-herdr-nexus-v1
+/nix/store/vkq4q1ii9wbfz96mfziz0lbn8w9lanz8-herdr-nexus-v1
 ```
 
 Invocation:
@@ -15,7 +15,7 @@ Invocation:
 ```sh
 PROOF_BASE=/tmp/herdr-v1-proof-af8fe3 \
   ./proof/live-herdr.sh \
-  /nix/store/brympvai7ri0vb8q4bnjbfy133cfjqw4-herdr-nexus-v1
+  /nix/store/vkq4q1ii9wbfz96mfziz0lbn8w9lanz8-herdr-nexus-v1
 ```
 
 The proof observed both owners reach `Ready`, rejected a malformed meta
@@ -37,10 +37,10 @@ Pressed.Done
 Closed.Done
 Closed.Done
 LIVE_HERDR_PROOF_OK /tmp/herdr-v1-proof-af8fe3
-cleanup owns base=/tmp/herdr-v1-proof-af8fe3 sessions=v1proof-li-1491458-one v1proof-li-1491458-two pids=1491466 1491468 1491474 1491476 1491527 1491548 panes=
+cleanup owns base=/tmp/herdr-v1-proof-af8fe3 sessions=v1proof-li-1495601-one v1proof-li-1495601-two pids=1495609 1495611 1495617 1495619 1495679 1495701 panes=
 deleting owned fixture directory /tmp/herdr-v1-proof-af8fe3
 ```
 
 The remote Nix test derivation passed core 8, daemon 8, translator 8,
-integration 1, runner 5, server 2, and wire 4 tests. The pinned Ethos Zero
+integration 1, runner 6, server 2, and wire 4 tests. The pinned Ethos Zero
 operation, memory, and emission regeneration checks also passed.
