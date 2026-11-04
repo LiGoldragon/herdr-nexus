@@ -119,7 +119,10 @@ impl Bootstrap {
     }
 
     pub fn serve_next_meta(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let (stream, _) = self.meta.listener.accept()?;
+        let (stream, _) = herdr_nexus_wire::accept_with_retry(
+            &self.meta.listener,
+            self.admission.retry_delay,
+        )?;
         require_peer(&stream, &self.translator_peer)?;
         let mut stream = DeadlineStream::new(stream, self.admission.deadline)?;
         serve_meta_once(
@@ -141,12 +144,13 @@ impl Bootstrap {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
         loop {
-            let stream = public
+            let stream = herdr_nexus_wire::accept_with_retry(
+                &public
                 .as_ref()
                 .expect("public listener notified only after binding")
-                .listener
-                .accept()
-                .map(|(stream, _)| stream)?;
+                .listener,
+                self.admission.retry_delay,
+            )?.0;
             let actual = herdr_nexus_wire::frame::peer_caller(&stream)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             if self.translator_peer.matches(&actual) {
@@ -319,6 +323,8 @@ struct DispatcherState {
     reserved: std::collections::HashMap<signal_herdr_nexus::Pane, u64>,
     revisions: std::collections::HashMap<signal_herdr_nexus::Pane, u64>,
     next_reservation: u64,
+    instance_id: signal_herdr_nexus::InstanceId,
+    next_creation_sequence: i64,
 }
 
 #[derive(Default)]
@@ -450,6 +456,7 @@ impl Dispatcher {
     pub fn new(
         paths: &SocketPaths,
         configuration: Arc<ConfigurationStore>,
+        instance_id: signal_herdr_nexus::InstanceId,
     ) -> Self {
         Self {
             state: std::sync::Mutex::new(DispatcherState {
@@ -458,6 +465,8 @@ impl Dispatcher {
                 reserved: std::collections::HashMap::new(),
                 revisions: std::collections::HashMap::new(),
                 next_reservation: 1,
+                instance_id,
+                next_creation_sequence: 1,
             }),
             emitter: Arc::new(SocketEmitter {
                 translator_socket: paths.translator.clone(),
@@ -482,6 +491,7 @@ impl Dispatcher {
         let mut dispatcher = Self::new(
             paths,
             configuration,
+            signal_herdr_nexus::InstanceId("test-instance".into()),
         );
         dispatcher.emitter = emitter;
         dispatcher
@@ -514,18 +524,46 @@ impl Dispatcher {
         use signal_herdr_nexus::Response;
         match operation(query) {
             Operation::Creating(workspace) => {
+                let creation_id = {
+                    let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    let creation_id = signal_herdr_nexus::CreationId {
+                        instance_id: state.instance_id.clone(),
+                        sequence: signal_herdr_nexus::Sequence(state.next_creation_sequence),
+                    };
+                    let Some(next) = state.next_creation_sequence.checked_add(1) else {
+                        return Response::Created(signal_herdr_nexus::Outcome::StoreRefused(
+                            signal_herdr_nexus::StoreRefusal {
+                                memory_refusal: signal_herdr_nexus::MemoryRefusal(
+                                    signal_herdr_nexus::Message("creation sequence exhausted".into()),
+                                ),
+                                store_phase: signal_herdr_nexus::StorePhase::BeforeEmission,
+                            },
+                        ));
+                    };
+                    let pending = herdr_nexus_core::generated::memory::PendingCreation {
+                        creation_id: creation_id.clone(),
+                        principal: principal.clone(),
+                        workspace: workspace.clone(),
+                    };
+                    if let Err(outcome) = state.core.prepare_creation(pending) {
+                        return Response::Created(outcome);
+                    }
+                    state.next_creation_sequence = next;
+                    creation_id
+                };
                 let external = self.execute(
                     &configuration,
                     Herdr {
                         session: workspace.session.clone(),
                         verb: Verb::WorkspaceCreate(WorkspaceCreate_Data {
+                            creation_id: creation_id.clone(),
                             root: workspace.root.clone(),
                             variable_vector: workspace.variable_vector.clone(),
                         }),
                     },
                 );
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                let outcome = state.core.create(workspace, created_result(external));
+                let outcome = state.core.create(creation_id, created_result(external));
                 if let signal_herdr_nexus::Outcome::Created(pane) = &outcome {
                     state.revisions.insert(pane.clone(), 1);
                     state.principals.insert(pane.clone(), principal);
@@ -628,25 +666,23 @@ impl Dispatcher {
                 Response::Closed(outcome)
             }
             Operation::Listing(session) => {
-                let captured = {
+                let (captured, pending) = {
                     let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                    match state.core.preflight_session(&session) {
-                        Ok(false) => {
-                            return Response::Listed(
-                                signal_herdr_nexus::Outcome::Listed(Vec::new()),
-                            )
-                        }
-                        Ok(true) => {
-                            let owns_any = state.principals.iter().any(|(pane, owner)| {
-                                owner == &principal && pane.session == session
-                            });
-                            if !owns_any {
-                                return Response::Listed(signal_herdr_nexus::Outcome::Listed(Vec::new()));
-                            }
-                            state.revisions.clone()
-                        },
+                    let owned = match state.core.owned_in_session(&session) {
+                        Ok(owned) => owned,
                         Err(outcome) => return Response::Listed(outcome),
+                    };
+                    let pending = match state.core.pending_in_session(&session) {
+                        Ok(pending) => pending,
+                        Err(outcome) => return Response::Listed(outcome),
+                    };
+                    let owns_any = owned.iter().any(|owned| {
+                        state.principals.get(&owned.pane) == Some(&principal)
+                    }) || pending.iter().any(|creation| creation.principal == principal);
+                    if !owns_any {
+                        return Response::Listed(signal_herdr_nexus::Outcome::Listed(Vec::new()));
                     }
+                    (state.revisions.clone(), pending)
                 };
                 let panes = self.execute(
                     &configuration,
@@ -655,7 +691,7 @@ impl Dispatcher {
                         verb: Verb::PaneList,
                     },
                 );
-                let external = match pane_listing_result(panes) {
+                let (pane_listings, external) = match pane_listing_result(panes) {
                     Ok(panes) => {
                         let agents = self.execute(
                             &configuration,
@@ -664,11 +700,27 @@ impl Dispatcher {
                                 verb: Verb::AgentList,
                             },
                         );
-                        join_listings(panes, agent_listing_result(agents))
+                        let external = join_listings(panes.clone(), agent_listing_result(agents));
+                        (Some(panes), external)
                     }
-                    Err(result) => result,
+                    Err(result) => (None, result),
+                };
+                let workspace_listings = if pending.is_empty() {
+                    None
+                } else {
+                    workspace_listing_result(self.execute(
+                        &configuration,
+                        Herdr {
+                            session: session.clone(),
+                            verb: Verb::WorkspaceList,
+                        },
+                    ))
+                    .ok()
                 };
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                if let (Some(panes), Some(workspaces)) = (&pane_listings, &workspace_listings) {
+                    adopt_pending_creations(&mut state, &pending, panes, workspaces);
+                }
                 let external = protect_newer_state(&state, &session, &captured, external);
                 let outcome = state.core.list(session.clone(), external);
                 let outcome = filter_listing(outcome, &principal, &state.principals);
@@ -720,9 +772,9 @@ impl Dispatcher {
         state
     }
 
-    /// Registers a nondurable stream in the session's shared poll source. The
-    /// hub serializes acknowledgement and direct event writes under one lock;
-    /// there is no delivery queue.
+    /// Registers a nondurable stream in the session's shared poll source.
+    /// Each subscriber has one bounded FIFO and one writer; publishing never
+    /// waits for socket I/O.
     pub fn subscribe(
         self: &Arc<Self>,
         stream: std::os::unix::net::UnixStream,
@@ -1247,6 +1299,64 @@ fn agent_listing_result(
             Err(herdr_nexus_core::ExternalResult::Unavailable(refusal))
         }
         _ => Err(herdr_nexus_core::ExternalResult::Uncertain),
+    }
+}
+
+fn workspace_listing_result(
+    outcome: EmissionResult,
+) -> Result<
+    Vec<emission_herdr_nexus::WorkspaceListing>,
+    herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>>,
+> {
+    match outcome {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Workspaces(observed)) => {
+            Ok(observed)
+        }
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
+            Err(herdr_nexus_core::ExternalResult::Refused(refusal))
+        }
+        EmissionResult::Unavailable(refusal) => {
+            Err(herdr_nexus_core::ExternalResult::Unavailable(refusal))
+        }
+        _ => Err(herdr_nexus_core::ExternalResult::Uncertain),
+    }
+}
+
+fn adopt_pending_creations(
+    state: &mut DispatcherState,
+    pending: &[herdr_nexus_core::generated::memory::PendingCreation],
+    panes: &[emission_herdr_nexus::PaneListing],
+    workspaces: &[emission_herdr_nexus::WorkspaceListing],
+) {
+    for creation in pending {
+        let matching_workspaces: Vec<_> = workspaces
+            .iter()
+            .filter(|workspace| {
+                emission_herdr_nexus::managed_creation_id(&workspace.workspace_label).as_ref()
+                    == Some(&creation.creation_id)
+            })
+            .collect();
+        if matching_workspaces.len() != 1 {
+            continue;
+        }
+        let matching_panes: Vec<_> = panes
+            .iter()
+            .filter(|pane| pane.workspace_id == matching_workspaces[0].workspace_id)
+            .collect();
+        if matching_panes.len() != 1 {
+            continue;
+        }
+        let pane = matching_panes[0].pane.clone();
+        if matches!(
+            state.core.create(
+                creation.creation_id.clone(),
+                herdr_nexus_core::ExternalResult::Succeeded(pane.clone()),
+            ),
+            signal_herdr_nexus::Outcome::Created(_)
+        ) {
+            state.principals.insert(pane.clone(), creation.principal.clone());
+            state.revisions.insert(pane, 1);
+        }
     }
 }
 
@@ -2100,6 +2210,121 @@ mod tests {
         };
         assert_eq!(known.len(), 1);
         assert_eq!(known[0].state, signal_herdr_nexus::State::Busy);
+    }
+
+    struct LostCreationEmitter {
+        pane: signal_herdr_nexus::Pane,
+        creation_id: std::sync::Mutex<Option<signal_herdr_nexus::CreationId>>,
+        creates: std::sync::atomic::AtomicUsize,
+        matching_marker: bool,
+    }
+
+    impl ExternalEmitter for LostCreationEmitter {
+        fn emit(
+            &self,
+            _configuration: &ReadyCoreConfiguration,
+            herdr: emission_herdr_nexus::Herdr,
+        ) -> EmissionResult {
+            use emission_herdr_nexus::{ExternalOutcome, Verb, WorkspaceId, WorkspaceListing};
+            EmissionResult::External(match herdr.verb {
+                Verb::WorkspaceCreate(data) => {
+                    self.creates.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    *self.creation_id.lock().expect("creation id") = Some(data.creation_id);
+                    ExternalOutcome::Uncertain
+                }
+                Verb::WorkspaceList => {
+                    let creation_id = self.creation_id.lock().expect("creation id").clone();
+                    ExternalOutcome::Workspaces(creation_id.into_iter().map(|creation_id| {
+                        WorkspaceListing {
+                            workspace_id: WorkspaceId("workspace".into()),
+                            workspace_label: if self.matching_marker {
+                                emission_herdr_nexus::managed_workspace_label(&creation_id)
+                            } else {
+                                emission_herdr_nexus::WorkspaceLabel("unrelated".into())
+                            },
+                        }
+                    }).collect())
+                }
+                Verb::PaneList => ExternalOutcome::Panes(vec![pane_listing(&self.pane)]),
+                Verb::AgentList => ExternalOutcome::Agents(Vec::new()),
+                _ => ExternalOutcome::Done,
+            })
+        }
+    }
+
+    #[test]
+    fn lost_creation_result_is_adopted_once_without_a_second_create() {
+        use signal_herdr_nexus::{Name, Outcome, Query, Response, Root, Value, Variable, Workspace};
+        let pane = signal_herdr_nexus::Pane {
+            session: signal_herdr_nexus::Session("reconcile".into()),
+            pane_id: signal_herdr_nexus::PaneId("pane".into()),
+        };
+        let emitter = Arc::new(LostCreationEmitter {
+            pane: pane.clone(),
+            creation_id: std::sync::Mutex::new(None),
+            creates: std::sync::atomic::AtomicUsize::new(0),
+            matching_marker: true,
+        });
+        let dispatcher = Dispatcher::with_emitter(&test_paths(), emitter.clone());
+        let configuration = test_configuration();
+        let created = dispatcher.dispatch(
+            Query::Create(Workspace {
+                session: pane.session.clone(),
+                root: Root("/tmp/reconcile".into()),
+                variable_vector: vec![Variable {
+                    name: Name("A".into()),
+                    value: Value("B".into()),
+                }],
+            }),
+            Arc::clone(&configuration),
+        );
+        assert!(matches!(created, Response::Created(Outcome::Uncertain)));
+
+        for _ in 0..2 {
+            let listed = dispatcher.dispatch(
+                Query::List(pane.session.clone()),
+                Arc::clone(&configuration),
+            );
+            assert!(matches!(
+                listed,
+                Response::Listed(Outcome::Listed(ref known))
+                    if known.len() == 1 && known[0].pane == pane
+            ));
+        }
+        assert_eq!(emitter.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unrelated_workspace_marker_is_not_adopted() {
+        use signal_herdr_nexus::{Outcome, Query, Response, Root, Workspace};
+        let pane = signal_herdr_nexus::Pane {
+            session: signal_herdr_nexus::Session("unrelated".into()),
+            pane_id: signal_herdr_nexus::PaneId("pane".into()),
+        };
+        let emitter = Arc::new(LostCreationEmitter {
+            pane: pane.clone(),
+            creation_id: std::sync::Mutex::new(None),
+            creates: std::sync::atomic::AtomicUsize::new(0),
+            matching_marker: false,
+        });
+        let dispatcher = Dispatcher::with_emitter(&test_paths(), emitter.clone());
+        let configuration = test_configuration();
+        assert!(matches!(
+            dispatcher.dispatch(
+                Query::Create(Workspace {
+                    session: pane.session.clone(),
+                    root: Root("/tmp/unrelated".into()),
+                    variable_vector: Vec::new(),
+                }),
+                Arc::clone(&configuration),
+            ),
+            Response::Created(Outcome::Uncertain)
+        ));
+        assert!(matches!(
+            dispatcher.dispatch(Query::List(pane.session), configuration),
+            Response::Listed(Outcome::Listed(ref known)) if known.is_empty()
+        ));
+        assert_eq!(emitter.creates.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     struct SubscriptionEmitter {

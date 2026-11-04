@@ -23,12 +23,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(
         bootstrap.paths(),
         bootstrap.configuration_store(),
+        place.instance_id,
     ));
 
     let meta = Arc::clone(&bootstrap);
     std::thread::spawn(move || loop {
         if let Err(error) = meta.serve_next_meta() {
-            eprintln!("herdr Nexus meta request failed: {error}");
+            eprintln!("herdr Nexus meta listener failed permanently: {error}");
+            std::process::exit(1);
         }
     });
 
@@ -36,8 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let accepted = match bootstrap.accept_public() {
             Ok(accepted) => accepted,
             Err(error) => {
-                eprintln!("herdr Nexus public accept failed: {error}");
-                continue;
+                return Err(format!("herdr Nexus public listener failed permanently: {error}").into());
             }
         };
         let stream = accepted.stream;

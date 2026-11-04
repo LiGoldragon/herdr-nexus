@@ -21,3 +21,11 @@ pub enum Answer {
     Succeeded,
     Failed(signal_herdr_nexus::MemoryRefusal),
 }
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PendingCreation {
+    pub creation_id: signal_herdr_nexus::CreationId,
+    pub principal: translator::Principal,
+    pub workspace: signal_herdr_nexus::Workspace,
+}

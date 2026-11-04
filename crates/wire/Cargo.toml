@@ -13,6 +13,7 @@ core-meta-herdr-nexus = { path = "../core-meta" }
 meta-signal-herdr-nexus.workspace = true
 shared-translator.workspace = true
 nix = { version = "0.30", features = ["socket"] }
+libc = "0.2"
 
 [lints.rust]
 unsafe_code = "forbid"

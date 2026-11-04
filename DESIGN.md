@@ -29,6 +29,17 @@ a refusal or uncertainty changes no pane to dead. Labels are stored unchanged
 in Memory and joined onto public observations there; external observations do
 not carry labels.
 
+Create is reconciled before it has a pane identity. The launcher gives each
+core process a fresh random `InstanceId`; the core pairs it with a monotonic
+`Sequence` and stores the resulting `PendingCreation` before emitting. The
+translator writes that identifier into the one managed workspace label. A
+lost Create result leaves the single pending record actionable. A later
+complete workspace snapshot and the same observation cycle's complete pane
+snapshot adopt only an exact one-workspace, one-pane join, then consume the
+pending record. Ambiguous, malformed, absent, and unrelated observations
+leave it pending. This proof Memory remains nondurable, so restart recovery is
+outside the proof's guarantee.
+
 ## Outcomes repaired from the draft
 
 The vision draft used one broad `Outcome` and did not express the point where
@@ -55,7 +66,10 @@ are deployment data, not Rust literals. Each attempt captures the fields it
 uses without holding Memory across external I/O.
 
 A launcher selects one `Place` from its typed registry and supplies exactly one
-typed binary bootstrap carrying the place and admission limits. Each metaflow
+typed binary bootstrap carrying the place and admission limits. Admission
+includes a positive deployment-chosen accept retry delay: recoverable resource
+pressure waits by that delay, while an invalid listener ends the owning
+process visibly. Each metaflow
 has separate public and meta translator sockets and separate public and meta
 Nexus sockets. The selected place is immutable for each bound process. The CLI
 takes a metaflow name and the launcher-supplied

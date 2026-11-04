@@ -38,7 +38,7 @@ chmod +x "$base/herdr-fixture"
 
 "$package/bin/herdr-pair" "$registry" one \
   "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-  50 8388608 1048576 64 >"$base/pair.log" 2>&1 &
+  50 8388608 25 1048576 64 >"$base/pair.log" 2>&1 &
 pair=$!
 for _ in $(seq 1 100); do
   [[ -S $directory/herdr-meta-translator.sock && -S $directory/herdr-meta.sock ]] && break

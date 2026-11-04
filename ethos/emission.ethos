@@ -1,11 +1,12 @@
 ; Temporary stand-in: Emission is a Signal root until ethos-zero supports Emission.
 Signal
-[ signal_herdr_nexus:[ Session PaneId Pane Root Variable Command Text Keys State Refusal ] ]
+[ signal_herdr_nexus:[ Session PaneId Pane Root Variable Command Text Keys State Refusal CreationId ] ]
 [ Emit.Herdr ]                                        ; emissions: one typed herdr call
 [ Emitted.ExternalOutcome ]                           ; external outcome
 [ Herdr.{ Session Verb }                               ; types: exactly one Session per call
   Timeout.Integer
-  Verb.[ WorkspaceCreate.{ Root Vector<Variable> }
+  Verb.[ WorkspaceCreate.{ CreationId Root Vector<Variable> }
+         WorkspaceList
          AgentStart.{ PaneId Command Timeout }
          AgentPrompt.{ PaneId Text }
          Keys.{ PaneId Keys }
@@ -14,14 +15,17 @@ Signal
          AgentList ]
   TerminalId.String
   WorkspaceId.String
+  WorkspaceLabel.String
   TabId.String
   PaneListing.{ Pane TerminalId WorkspaceId TabId }
   AgentListing.{ Pane TerminalId WorkspaceId TabId State }
+  WorkspaceListing.{ WorkspaceId WorkspaceLabel }
   PaneObservation.{ Pane State }
   ExternalOutcome.[ Done
                     Started.State
                     Created.Pane
                     Panes.Vector<PaneListing>
                     Agents.Vector<AgentListing>
+                    Workspaces.Vector<WorkspaceListing>
                     Refused.Refusal
                     Uncertain ] ]

@@ -1,6 +1,7 @@
 Library
 [ shared_translator:[ Place UserId GroupId ProcessId PeerIdentity ] ; imports
-  meta_signal_herdr_nexus:[ BudgetValue ] ]
+  meta_signal_herdr_nexus:[ BudgetValue ]
+  signal_herdr_nexus:[ InstanceId ] ]
 [ Caller.{ UserId GroupId ProcessId }                 ; types
   Lane.[ PublicText MetaText EmissionSignal ]
   Kind.[ Request Answered Failed ]
@@ -13,8 +14,9 @@ Library
                  PublicTranslatorSocket MetaTranslatorSocket }
   FrameDeadlineMilliseconds.Integer
   FrameCapacityBytes.Integer
-  Admission.{ FrameDeadlineMilliseconds FrameCapacityBytes }
-  CoreBootstrap.{ Place Admission PeerIdentity }
+  RetryDelayMilliseconds.Integer
+  Admission.{ FrameDeadlineMilliseconds FrameCapacityBytes RetryDelayMilliseconds }
+  CoreBootstrap.{ Place Admission PeerIdentity InstanceId }
   TranslatorBootstrap.{ Place Admission BudgetValue PeerIdentity } ]
 []                                                    ; traits
 []                                                    ; associations

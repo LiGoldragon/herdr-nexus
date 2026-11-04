@@ -9,6 +9,27 @@ use shared_translator::{PeerIdentity, ProcessId, UserId};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 
+fn fresh_instance_id() -> Result<signal_herdr_nexus::InstanceId, Box<dyn std::error::Error>> {
+    let mut bytes = [0_u8; 16];
+    let mut filled = 0;
+    while filled < bytes.len() {
+        let count = rustix::rand::getrandom(
+            &mut bytes[filled..],
+            rustix::rand::GetRandomFlags::empty(),
+        )?;
+        if count == 0 {
+            return Err("kernel randomness returned no bytes".into());
+        }
+        filled += count;
+    }
+    let mut identifier = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        write!(&mut identifier, "{byte:02x}")?;
+    }
+    Ok(signal_herdr_nexus::InstanceId(identifier))
+}
+
 fn text_budget() -> Budget {
     Budget {
         remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("wire maximum fits i64"),
@@ -46,6 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             arguments.next(),
             "FRAME_CAPACITY_BYTES",
         )?),
+        retry_delay_milliseconds: RetryDelayMilliseconds(integer(
+            arguments.next(),
+            "RETRY_DELAY_MILLISECONDS",
+        )?),
     };
     herdr_nexus_wire::ValidAdmission::try_from(&admission)
         .map_err(|message| format!("invalid admission: {message}"))?;
@@ -82,6 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let user_id = UserId(i64::from(Uid::current().as_raw()));
     let core_pid = ProcessId(i64::from(core.id()));
     let translator_pid = ProcessId(i64::from(translator.id()));
+    let instance_id = fresh_instance_id()?;
     let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
     let bootstrapped = (|| -> Result<(), Box<dyn std::error::Error>> {
         let mut core_input = core.stdin.take().ok_or("core bootstrap pipe")?;
@@ -93,6 +119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     user_id: user_id.clone(),
                     process_id: translator_pid,
                 },
+                instance_id,
             }
             .signalize()?,
             capacity,

@@ -1,5 +1,7 @@
 Memory
-[ signal_herdr_nexus:[ Pane Workspace Label State Attempt MemoryRefusal ] ] ; imports
+[ signal_herdr_nexus:[ Pane Workspace Label State Attempt MemoryRefusal CreationId ] ; imports
+  translator:[ Principal ] ]
 [ OwnedPane.{ Pane Workspace Option<Label> State Attempt } ; an owned pane and its bounded attempt state
   Answer.[ Succeeded                               ; standard result of a Memory change
-            Failed.MemoryRefusal ] ]
+            Failed.MemoryRefusal ]
+  PendingCreation.{ CreationId Principal Workspace } ]

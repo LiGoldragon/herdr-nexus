@@ -24,7 +24,7 @@ start_pair() {
   mv "$registry.new" "$registry"
   "$package/bin/herdr-pair" "$registry" one \
     "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-    5000 8388608 1048576 64 >"$base/$generation.log" 2>&1 &
+    5000 8388608 25 1048576 64 >"$base/$generation.log" 2>&1 &
   pair_pid=$!
   launchers+=("$pair_pid")
   child_pids=()

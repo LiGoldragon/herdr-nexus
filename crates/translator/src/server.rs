@@ -1,7 +1,8 @@
 use crate::runner::{self, Captured};
 use emission_herdr_nexus::{
     AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data,
-    PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId,
+    PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId, WorkspaceLabel,
+    WorkspaceListing,
 };
 use serde::Deserialize;
 use shared_translator::placement::Place;
@@ -75,14 +76,17 @@ pub fn run(
     let meta_configuration = std::sync::Arc::clone(&configuration);
     let meta_place = place.clone();
     std::thread::spawn(move || {
-        serve_listener(
+        if let Err(error) = serve_listener(
             meta,
             meta_configuration,
             meta_place,
             Endpoint::Meta,
             bootstrap_meta,
             meta_peer,
-        )
+        ) {
+            eprintln!("herdr translator meta listener failed permanently: {error}");
+            std::process::exit(1);
+        }
     });
     serve_listener(
         public,
@@ -91,7 +95,7 @@ pub fn run(
         Endpoint::Public,
         bootstrap_meta,
         nexus_peer,
-    );
+    )?;
     Ok(())
 }
 
@@ -102,15 +106,13 @@ fn serve_listener(
     endpoint: Endpoint,
     bootstrap: BootstrapMeta,
     nexus_peer: std::sync::Arc<NexusPeer>,
-) {
-    for stream in bound.listener.incoming() {
-        let mut stream = match stream {
-            Ok(stream) => stream,
-            Err(error) => {
-                eprintln!("herdr translator accept failed: {error}");
-                continue;
-            }
-        };
+) -> Result<(), ServerError> {
+    loop {
+        let (mut stream, _) = herdr_nexus_wire::accept_with_retry(
+            &bound.listener,
+            bootstrap.admission.retry_delay,
+        )
+        .map_err(ServerError::Io)?;
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         let nexus_peer = std::sync::Arc::clone(&nexus_peer);
@@ -862,6 +864,8 @@ impl Arguable for WorkspaceCreate_Data {
             OsString::from("create"),
             OsString::from("--cwd"),
             OsString::from(&self.root.0),
+            OsString::from("--label"),
+            OsString::from(emission_herdr_nexus::managed_workspace_label(&self.creation_id).0),
         ];
         for variable in &self.variable_vector {
             arguments.push(OsString::from("--env"));
@@ -942,6 +946,14 @@ impl Arguable for PaneListArgument {
     }
 }
 
+struct WorkspaceListArgument;
+
+impl Arguable for WorkspaceListArgument {
+    fn arguments(&self) -> Vec<OsString> {
+        vec![OsString::from("workspace"), OsString::from("list")]
+    }
+}
+
 struct AgentListArgument;
 
 impl Arguable for AgentListArgument {
@@ -958,6 +970,7 @@ struct Invocation {
 
 enum Decoder {
     WorkspaceCreate,
+    WorkspaceList,
     AgentStart {
         pane_id: String,
         name: String,
@@ -976,6 +989,11 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
     let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
     let (specific, timeout, decoder) = match verb {
         Verb::WorkspaceCreate(data) => (data.arguments(), runtime.call_timeout, Decoder::WorkspaceCreate),
+        Verb::WorkspaceList => (
+            WorkspaceListArgument.arguments(),
+            runtime.call_timeout,
+            Decoder::WorkspaceList,
+        ),
         Verb::AgentStart(data) => {
             let start_timeout = positive_duration(data.timeout.0)?;
             let kind = agent_kind(&data.command.agent_kind);
@@ -1043,6 +1061,7 @@ fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalO
     }
     match decoder {
         Decoder::WorkspaceCreate => decode_workspace(&captured.stdout, session),
+        Decoder::WorkspaceList => decode_workspaces(&captured.stdout),
         Decoder::AgentStart {
             pane_id,
             name,
@@ -1062,6 +1081,7 @@ impl Decoder {
     fn response_id(&self) -> &'static str {
         match self {
             Self::WorkspaceCreate => "cli:workspace:create",
+            Self::WorkspaceList => "cli:workspace:list",
             Self::AgentStart { .. } => "cli:agent:start",
             Self::AgentPrompt { .. } => "cli:agent:prompt",
             Self::Keys => "cli:pane:send-keys",
@@ -1170,6 +1190,19 @@ struct WorkspaceResult {
 }
 
 #[derive(Deserialize)]
+struct WorkspaceListResult {
+    #[serde(rename = "type")]
+    kind: String,
+    workspaces: Vec<WorkspaceListItem>,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceListItem {
+    workspace_id: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
 struct StartResult {
     #[serde(rename = "type")]
     kind: String,
@@ -1219,6 +1252,27 @@ fn decode_workspace(bytes: &[u8], session: &Session) -> ExternalOutcome {
         session: session.clone(),
         pane_id: PaneId(envelope.result.root_pane.pane_id),
     })
+}
+
+fn decode_workspaces(bytes: &[u8]) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<WorkspaceListResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if envelope.id != "cli:workspace:list" || envelope.result.kind != "workspace_list" {
+        return ExternalOutcome::Uncertain;
+    }
+    let mut workspace_ids = HashSet::new();
+    let mut listings = Vec::with_capacity(envelope.result.workspaces.len());
+    for workspace in envelope.result.workspaces {
+        if !workspace_ids.insert(workspace.workspace_id.clone()) {
+            return ExternalOutcome::Uncertain;
+        }
+        listings.push(WorkspaceListing {
+            workspace_id: WorkspaceId(workspace.workspace_id),
+            workspace_label: WorkspaceLabel(workspace.label),
+        });
+    }
+    ExternalOutcome::Workspaces(listings)
 }
 
 fn decode_start(bytes: &[u8], pane_id: &str, name: &str, kind: &str) -> ExternalOutcome {
@@ -1437,6 +1491,7 @@ mod tests {
             herdr_nexus_wire::ValidAdmission {
                 deadline: Duration::from_secs(1),
                 frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                retry_delay: Duration::from_millis(5),
             },
             (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
         )
@@ -1471,6 +1526,7 @@ mod tests {
             herdr_nexus_wire::ValidAdmission {
                 deadline: Duration::from_secs(1),
                 frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                retry_delay: Duration::from_millis(5),
             },
             (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
         )
@@ -1517,6 +1573,7 @@ mod tests {
                 admission: herdr_nexus_wire::ValidAdmission {
                     deadline: Duration::from_secs(1),
                     frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                    retry_delay: Duration::from_millis(5),
                 },
                 text_budget: (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
             },
@@ -1790,6 +1847,7 @@ mod tests {
                 herdr_nexus_wire::ValidAdmission {
                     deadline: Duration::from_secs(1),
                     frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                    retry_delay: Duration::from_millis(5),
                 },
                 (4096, 32),
             )

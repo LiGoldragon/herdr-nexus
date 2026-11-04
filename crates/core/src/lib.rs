@@ -8,10 +8,10 @@ pub mod generated;
 pub use generated::operation::Operation;
 
 use emission_herdr_nexus::PaneObservation;
-use generated::memory::{Answer, OwnedPane};
+use generated::memory::{Answer, OwnedPane, PendingCreation};
 use signal_herdr_nexus::{
-    Attempt, Command, Keys, Known, Label, MemoryRefusal, ObservedEffect, Outcome, Pane, Refusal,
-    Session, State, StorePhase, StoreRefusal, Text, Workspace,
+    Attempt, Command, CreationId, Keys, Known, Label, MemoryRefusal, ObservedEffect, Outcome, Pane,
+    Refusal, Session, State, StorePhase, StoreRefusal, Text,
 };
 use std::collections::HashMap;
 
@@ -39,11 +39,17 @@ pub trait Memory {
         session: &Session,
         observed: &[PaneObservation],
     ) -> Answer;
+    fn pending(&self, creation_id: &CreationId) -> Result<Option<PendingCreation>, MemoryRefusal>;
+    fn pending_in_session(&self, session: &Session) -> Result<Vec<PendingCreation>, MemoryRefusal>;
+    fn store_pending(&mut self, pending: PendingCreation) -> Answer;
+    fn finish_created(&mut self, creation_id: &CreationId, pane: Pane) -> Answer;
+    fn discard_pending(&mut self, creation_id: &CreationId) -> Answer;
 }
 
 #[derive(Default)]
 pub struct InMemory {
     panes: HashMap<Pane, OwnedPane>,
+    pending: HashMap<CreationId, PendingCreation>,
 }
 
 impl InMemory {
@@ -125,6 +131,58 @@ impl Memory for InMemory {
         }
         Answer::Succeeded
     }
+
+    fn pending(&self, creation_id: &CreationId) -> Result<Option<PendingCreation>, MemoryRefusal> {
+        Ok(self.pending.get(creation_id).cloned())
+    }
+
+    fn pending_in_session(&self, session: &Session) -> Result<Vec<PendingCreation>, MemoryRefusal> {
+        Ok(self
+            .pending
+            .values()
+            .filter(|pending| &pending.workspace.session == session)
+            .cloned()
+            .collect())
+    }
+
+    fn store_pending(&mut self, pending: PendingCreation) -> Answer {
+        if self.pending.contains_key(&pending.creation_id) {
+            return Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
+                "creation identifier is already pending".into(),
+            )));
+        }
+        self.pending.insert(pending.creation_id.clone(), pending);
+        Answer::Succeeded
+    }
+
+    fn finish_created(&mut self, creation_id: &CreationId, pane: Pane) -> Answer {
+        let Some(pending) = self.pending.remove(creation_id) else {
+            return Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
+                "creation identifier is not pending".into(),
+            )));
+        };
+        self.panes.insert(
+            pane.clone(),
+            OwnedPane {
+                pane,
+                workspace: pending.workspace,
+                label_option: None,
+                state: State::Open,
+                attempt: Attempt::Settled,
+            },
+        );
+        Answer::Succeeded
+    }
+
+    fn discard_pending(&mut self, creation_id: &CreationId) -> Answer {
+        if self.pending.remove(creation_id).is_some() {
+            Answer::Succeeded
+        } else {
+            Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
+                "creation identifier is not pending".into(),
+            )))
+        }
+    }
 }
 
 fn reconciled_state(owned: &OwnedPane, seen: Option<&PaneObservation>) -> State {
@@ -155,27 +213,39 @@ impl<M> Core<M> {
 }
 
 impl<M: Memory> Core<M> {
-    pub fn create(&mut self, workspace: Workspace, external: ExternalResult<Pane>) -> Outcome {
+    pub fn prepare_creation(&mut self, pending: PendingCreation) -> Result<(), Outcome> {
+        match self.memory.store_pending(pending) {
+            Answer::Succeeded => Ok(()),
+            Answer::Failed(refusal) => Err(store_refused(refusal, StorePhase::BeforeEmission)),
+        }
+    }
+
+    pub fn create(&mut self, creation_id: CreationId, external: ExternalResult<Pane>) -> Outcome {
         match external {
             ExternalResult::Succeeded(pane) => {
-                let owned = OwnedPane {
-                    pane: pane.clone(),
-                    workspace,
-                    label_option: None,
-                    state: State::Open,
-                    attempt: Attempt::Settled,
-                };
-                match self.memory.store_owned(owned) {
+                match self.memory.finish_created(&creation_id, pane.clone()) {
                     Answer::Succeeded => Outcome::Created(pane),
                     Answer::Failed(refusal) => {
                         store_refused(refusal, StorePhase::Observed(ObservedEffect::Created(pane)))
                     }
                 }
             }
-            ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
-            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
+            ExternalResult::Refused(refusal) => match self.memory.discard_pending(&creation_id) {
+                Answer::Succeeded => Outcome::Refused(refusal),
+                Answer::Failed(memory_refusal) => store_refused(memory_refusal, StorePhase::Uncertain),
+            },
+            ExternalResult::Unavailable(refusal) => match self.memory.discard_pending(&creation_id) {
+                Answer::Succeeded => Outcome::Unavailable(refusal),
+                Answer::Failed(memory_refusal) => store_refused(memory_refusal, StorePhase::Uncertain),
+            },
             ExternalResult::Uncertain => Outcome::Uncertain,
         }
+    }
+
+    pub fn pending_in_session(&self, session: &Session) -> Result<Vec<PendingCreation>, Outcome> {
+        self.memory
+            .pending_in_session(session)
+            .map_err(|refusal| store_refused(refusal, StorePhase::BeforeEmission))
     }
 
     pub fn start(
@@ -337,7 +407,9 @@ fn store_refused(memory_refusal: MemoryRefusal, store_phase: StorePhase) -> Outc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use signal_herdr_nexus::{Message, Name, PaneId, Root, Value, Variable};
+    use signal_herdr_nexus::{
+        InstanceId, Message, Name, PaneId, Root, Sequence, Value, Variable, Workspace,
+    };
     use std::cell::Cell;
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -347,6 +419,9 @@ mod tests {
         CloseOwned,
         StoreAttempt,
         ReconcileListing,
+        StorePending,
+        FinishCreated,
+        DiscardPending,
     }
 
     struct RefusingMemory {
@@ -427,6 +502,35 @@ mod tests {
             }
             self.memory.reconcile_listing(session, observed)
         }
+
+        fn pending(&self, creation_id: &CreationId) -> Result<Option<PendingCreation>, MemoryRefusal> {
+            self.memory.pending(creation_id)
+        }
+
+        fn pending_in_session(&self, session: &Session) -> Result<Vec<PendingCreation>, MemoryRefusal> {
+            self.memory.pending_in_session(session)
+        }
+
+        fn store_pending(&mut self, pending: PendingCreation) -> Answer {
+            match self.refusal(Call::StorePending) {
+                Answer::Succeeded => self.memory.store_pending(pending),
+                failed => failed,
+            }
+        }
+
+        fn finish_created(&mut self, creation_id: &CreationId, pane: Pane) -> Answer {
+            match self.refusal(Call::FinishCreated) {
+                Answer::Succeeded => self.memory.finish_created(creation_id, pane),
+                failed => failed,
+            }
+        }
+
+        fn discard_pending(&mut self, creation_id: &CreationId) -> Answer {
+            match self.refusal(Call::DiscardPending) {
+                Answer::Succeeded => self.memory.discard_pending(creation_id),
+                failed => failed,
+            }
+        }
     }
 
     fn pane() -> Pane {
@@ -447,6 +551,21 @@ mod tests {
         }
     }
 
+    fn creation_id() -> CreationId {
+        CreationId {
+            instance_id: InstanceId("instance".into()),
+            sequence: Sequence(1),
+        }
+    }
+
+    fn pending() -> PendingCreation {
+        PendingCreation {
+            creation_id: creation_id(),
+            principal: translator::Principal::Login(translator::UserId(1000)),
+            workspace: workspace(),
+        }
+    }
+
     fn seeded() -> InMemory {
         let mut memory = InMemory::default();
         memory
@@ -464,11 +583,42 @@ mod tests {
     #[test]
     fn creation_success_is_owned() {
         let mut core = Core::new(InMemory::default());
+        core.prepare_creation(pending()).expect("pending creation");
         assert_eq!(
-            core.create(workspace(), ExternalResult::Succeeded(pane())),
+            core.create(creation_id(), ExternalResult::Succeeded(pane())),
             Outcome::Created(pane())
         );
         assert!(core.memory().owned(&pane()).expect("read").is_some());
+    }
+
+    #[test]
+    fn creation_store_refusal_precedes_any_external_attempt() {
+        let mut core = Core::new(RefusingMemory::new(
+            InMemory::default(),
+            Call::StorePending,
+        ));
+        assert!(matches!(
+            core.prepare_creation(pending()),
+            Err(Outcome::StoreRefused(StoreRefusal {
+                store_phase: StorePhase::BeforeEmission,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn uncertain_creation_keeps_one_pending_fact_without_a_pane() {
+        let mut core = Core::new(InMemory::default());
+        core.prepare_creation(pending()).expect("pending creation");
+        assert_eq!(
+            core.create(creation_id(), ExternalResult::Uncertain),
+            Outcome::Uncertain
+        );
+        assert!(core.memory().owned(&pane()).expect("owned read").is_none());
+        assert_eq!(
+            core.memory().pending(&creation_id()).expect("pending read"),
+            Some(pending())
+        );
     }
 
     #[test]
@@ -533,8 +683,10 @@ mod tests {
 
     #[test]
     fn observed_success_and_later_store_refusal_are_both_returned() {
-        let mut core = Core::new(RefusingMemory::new(InMemory::default(), Call::StoreOwned));
-        let outcome = core.create(workspace(), ExternalResult::Succeeded(pane()));
+        let mut memory = InMemory::default();
+        memory.store_pending(pending());
+        let mut core = Core::new(RefusingMemory::new(memory, Call::FinishCreated));
+        let outcome = core.create(creation_id(), ExternalResult::Succeeded(pane()));
         assert!(matches!(
             outcome,
             Outcome::StoreRefused(StoreRefusal {

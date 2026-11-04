@@ -19,6 +19,7 @@ pub struct Timeout(pub i64);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct WorkspaceCreate_Data {
+    pub creation_id: signal_herdr_nexus::CreationId,
     pub root: signal_herdr_nexus::Root,
     pub variable_vector: std::vec::Vec<signal_herdr_nexus::Variable>,
 }
@@ -49,6 +50,7 @@ pub struct Keys_Data {
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Verb {
     WorkspaceCreate(WorkspaceCreate_Data),
+    WorkspaceList,
     AgentStart(AgentStart_Data),
     AgentPrompt(AgentPrompt_Data),
     Keys(Keys_Data),
@@ -64,6 +66,10 @@ pub struct TerminalId(pub String);
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct WorkspaceId(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct WorkspaceLabel(pub String);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
@@ -90,6 +96,13 @@ pub struct AgentListing {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct WorkspaceListing {
+    pub workspace_id: WorkspaceId,
+    pub workspace_label: WorkspaceLabel,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct PaneObservation {
     pub pane: signal_herdr_nexus::Pane,
     pub state: signal_herdr_nexus::State,
@@ -103,6 +116,7 @@ pub enum ExternalOutcome {
     Created(signal_herdr_nexus::Pane),
     Panes(std::vec::Vec<PaneListing>),
     Agents(std::vec::Vec<AgentListing>),
+    Workspaces(std::vec::Vec<WorkspaceListing>),
     Refused(signal_herdr_nexus::Refusal),
     Uncertain,
 }

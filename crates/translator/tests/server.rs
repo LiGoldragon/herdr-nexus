@@ -86,6 +86,9 @@ case "$3:$4" in
   workspace:create)
     printf '%s\n' '{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{},"tab":{},"root_pane":{"pane_id":"w:p","terminal_id":"t","workspace_id":"w","tab_id":"tab","focused":true,"agent_status":"unknown","revision":1}}}'
     ;;
+  workspace:list)
+    printf '%s\n' '{"id":"cli:workspace:list","result":{"type":"workspace_list","workspaces":[{"workspace_id":"w","label":"herdr-nexus-v1:7:fixture:1"}]}}'
+    ;;
   agent:start)
     printf '%s\n' '{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"terminal_id":"t","name":"probe","agent":"codex","agent_status":"idle","workspace_id":"w","tab_id":"tab","pane_id":"w:p","focused":true,"interactive_ready":true,"revision":2},"argv":["codex"],"executable":"codex"}}'
     ;;
@@ -116,6 +119,10 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
     let created = execute(
         &runtime,
         &herdr(Verb::WorkspaceCreate(WorkspaceCreate_Data {
+            creation_id: signal_herdr_nexus::CreationId {
+                instance_id: signal_herdr_nexus::InstanceId("fixture".into()),
+                sequence: signal_herdr_nexus::Sequence(1),
+            },
             root: Root("/work with space".into()),
             variable_vector: vec![Variable {
                 name: Name("A".into()),
@@ -133,10 +140,20 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
             "create",
             "--cwd",
             "/work with space",
+            "--label",
+            "herdr-nexus-v1:7:fixture:1",
             "--env",
             "A=one two",
         ]
     );
+
+    let ExternalOutcome::Workspaces(workspaces) =
+        execute(&runtime, &herdr(Verb::WorkspaceList))
+    else {
+        panic!("workspace list expected");
+    };
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(workspaces[0].workspace_id.0, "w");
 
     let started = execute(
         &runtime,

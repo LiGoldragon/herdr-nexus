@@ -69,9 +69,14 @@ pub struct FrameCapacityBytes(pub i64);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct RetryDelayMilliseconds(pub i64);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Admission {
     pub frame_deadline_milliseconds: FrameDeadlineMilliseconds,
     pub frame_capacity_bytes: FrameCapacityBytes,
+    pub retry_delay_milliseconds: RetryDelayMilliseconds,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -80,6 +85,7 @@ pub struct CoreBootstrap {
     pub place: Place,
     pub admission: Admission,
     pub peer_identity: shared_translator::PeerIdentity,
+    pub instance_id: signal_herdr_nexus::InstanceId,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
