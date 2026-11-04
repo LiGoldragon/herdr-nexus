@@ -23,9 +23,27 @@ declare -a launchers=()
 current_case=preflight
 failure() {
   local status=$? line=${BASH_LINENO[0]:-unknown}
+  trap - ERR
+  set +e
   echo "BACKEND_PAIR_CASE_FAILED case=$current_case line=$line status=$status" >&2
+  echo "COMMAND=$launcher PLACE=${place:-<unset>} DEPLOYMENT=${deployment:-<unset>} CORE=$core TRANSLATOR=$translator 70000 8388608 25 1048576 64" >&2
+  if [[ -n ${pair_pid:-} && -r /proc/$pair_pid/status ]]; then
+    echo "PAIR_PID=$pair_pid CHILDREN=$(cat /proc/$pair_pid/task/$pair_pid/children 2>/dev/null)" >&2
+    sed -n '/^Name:/p;/^State:/p;/^Pid:/p;/^PPid:/p;/^Uid:/p' "/proc/$pair_pid/status" >&2
+    for child in $(cat "/proc/$pair_pid/task/$pair_pid/children" 2>/dev/null); do
+      echo "CHILD_PID=$child EXE=$(readlink "/proc/$child/exe" 2>/dev/null)" >&2
+      sed -n '/^Name:/p;/^State:/p;/^Pid:/p;/^PPid:/p;/^Uid:/p' "/proc/$child/status" >&2
+    done
+  fi
   for log in "${case_root:-}/pair.log" "${case_root:-}/loser.log"; do
     [[ -f $log ]] && { echo "--- $log" >&2; cat "$log" >&2; }
+  done
+  if [[ -n ${state_root:-} && -f $state_root/fixture.path-failure ]]; then
+    echo "--- $state_root/fixture.path-failure" >&2
+    cat "$state_root/fixture.path-failure" >&2
+  fi
+  for root in "${runtime:-}" "${config_root:-}" "${state_root:-}"; do
+    [[ -e $root ]] && find "$root" -xdev -printf 'RESOURCE dev=%D ino=%i mode=%m type=%y path=%p\n' >&2
   done
   exit "$status"
 }

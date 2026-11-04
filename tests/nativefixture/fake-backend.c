@@ -42,17 +42,60 @@ static int has(const char *state, const char *name) {
   return join(path, sizeof path, state, name) == 0 && access(path, F_OK) == 0;
 }
 
+static void record_path_failure(const char *session, const char *config,
+                                const char *state, const char *api,
+                                int api_length, const char *client,
+                                int client_length, int failure_errno) {
+  char record[4096];
+  if (join(record, sizeof record, state, "fixture.path-failure") < 0) return;
+  FILE *output = fopen(record, "w");
+  if (!output) return;
+  fprintf(output,
+          "XDG_CONFIG_HOME=%s\nXDG_STATE_HOME=%s\nsession=%s\n"
+          "api_socket=%s\napi_socket_length=%d\n"
+          "client_socket=%s\nclient_socket_length=%d\n"
+          "sun_path_capacity=%zu\ncanonicalizes_fd_paths=false\nerrno=%d\n",
+          config, state, session, api, api_length, client, client_length,
+          sizeof(((struct sockaddr_un *)0)->sun_path), failure_errno);
+  fclose(output);
+}
+
 static int paths(const char *session, const char *config, const char *state) {
-  char sessions[4096], directory[4096], leaf[512];
-  if (join(sessions, sizeof sessions, config, "herdr/sessions") < 0 ||
-      join(directory, sizeof directory, sessions, session) < 0 ||
-      mkdirs(directory) < 0 ||
-      join(api_socket, sizeof api_socket, directory, "herdr.sock") < 0 ||
-      join(client_socket, sizeof client_socket, directory, "herdr-client.sock") < 0)
+  char directory[4096], api_full[4096], client_full[4096], leaf[512];
+  int directory_length = snprintf(directory, sizeof directory,
+                                  "%s/herdr/sessions/%s", config, session);
+  int api_length = snprintf(api_full, sizeof api_full, "%s/herdr.sock", directory);
+  int client_length = snprintf(client_full, sizeof client_full,
+                               "%s/herdr-client.sock", directory);
+  if (directory_length < 0 || (size_t)directory_length >= sizeof directory ||
+      api_length < 0 || (size_t)api_length >= sizeof api_full ||
+      client_length < 0 || (size_t)client_length >= sizeof client_full ||
+      (size_t)api_length >= sizeof api_socket ||
+      (size_t)client_length >= sizeof client_socket) {
+    errno = ENAMETOOLONG;
+    record_path_failure(session, config, state, api_full, api_length,
+                        client_full, client_length, errno);
     return -1;
+  }
+  if (mkdirs(directory) < 0) {
+    int failure_errno = errno;
+    record_path_failure(session, config, state, api_full, api_length,
+                        client_full, client_length, failure_errno);
+    errno = failure_errno;
+    return -1;
+  }
+  memcpy(api_socket, api_full, (size_t)api_length + 1);
+  memcpy(client_socket, client_full, (size_t)client_length + 1);
   int written = snprintf(leaf, sizeof leaf, "fixture.%s.pid", session);
-  return written >= 0 && (size_t)written < sizeof leaf &&
-                 join(pid_path, sizeof pid_path, state, leaf) == 0 ? 0 : -1;
+  if (written < 0 || (size_t)written >= sizeof leaf ||
+      join(pid_path, sizeof pid_path, state, leaf) < 0) {
+    int failure_errno = errno;
+    record_path_failure(session, config, state, api_full, api_length,
+                        client_full, client_length, failure_errno);
+    errno = failure_errno;
+    return -1;
+  }
+  return 0;
 }
 
 static int bind_unix(const char *path) {
