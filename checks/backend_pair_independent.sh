@@ -19,7 +19,7 @@ done
 readelf -h "$fake" | grep -q 'Type:'
 
 base=$(mktemp -d "${TMPDIR:-/tmp}/b.XXXXXX")
-declare -a launchers=()
+declare -A active_launchers=()
 current_case=preflight
 case_index=0
 failure() {
@@ -52,11 +52,12 @@ trap failure ERR
 cleanup() {
   trap - ERR
   set +e
-  for pid in "${launchers[@]:-}"; do
-    if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; fi
+  for pid in "${!active_launchers[@]}"; do
+    kill "$pid" 2>/dev/null || true
   done
-  for pid in "${launchers[@]:-}"; do
-    if [[ -n $pid ]]; then wait "$pid" 2>/dev/null || true; fi
+  for pid in "${!active_launchers[@]}"; do
+    wait "$pid" 2>/dev/null || true
+    unset 'active_launchers[$pid]'
   done
   find "$base" -xdev -print >"$base.deletion-list"
   awk -v root="$base" 'index($0, root) != 1 { exit 1 }' "$base.deletion-list" || return
@@ -90,7 +91,17 @@ launch() {
     "$launcher" "$place" "$deployment" "$core" "$translator" \
       70000 8388608 25 1048576 64 >"$log" 2>&1 &
   pair_pid=$!
-  launchers+=("$pair_pid")
+  active_launchers[$pair_pid]=1
+}
+
+reap_launcher() {
+  local pid=$1 status
+  set +e
+  wait "$pid"
+  status=$?
+  set -e
+  unset 'active_launchers[$pid]'
+  return "$status"
 }
 
 wait_exit() {
@@ -171,7 +182,7 @@ stop_pair() {
   local pid=$pair_pid
   kill "$pid"
   wait_exit "$pid"
-  wait "$pid" 2>/dev/null || true
+  reap_launcher "$pid" 2>/dev/null || true
 }
 
 assert_no_children() {
@@ -224,8 +235,8 @@ require_backend_ready
 winner=$pair_pid
 HOME=$case_root/home "$launcher" "$place" "$deployment" "$core" "$translator" \
   70000 8388608 25 1048576 64 >"$case_root/loser.log" 2>&1 &
-loser=$!; launchers+=("$loser")
-wait_exit "$loser"; ! wait "$loser"
+loser=$!; active_launchers[$loser]=1
+wait_exit "$loser"; ! reap_launcher "$loser"
 kill -0 "$winner"
 require_backend_ready
 pair_pid=$winner; stop_pair
@@ -233,21 +244,21 @@ pair_pid=$winner; stop_pair
 # Pre-existing claim and backend sockets are conflicts; neither is adopted.
 prepare stale-claim
 touch "$runtime/o"
-launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
 [[ -f $runtime/o ]]
 
 prepare stale-socket
 stale_name=$(session_name)
 mkdir -p "$config_root/herdr/sessions/$stale_name"
 touch "$config_root/herdr/sessions/$stale_name/herdr.sock"
-launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
 [[ -f $config_root/herdr/sessions/$stale_name/herdr.sock ]]
 
 # Descriptor-confined roots reject a symlink component when it is used.
 prepare symlink-root
 mkdir -p "$case_root/outside"
 ln -s "$case_root/outside" "$state/c"
-launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
 [[ -z $(find "$case_root/outside" -mindepth 1 -print -quit) ]]
 
 # Invalid configuration is rejected before a backend effect.
@@ -265,21 +276,21 @@ for invalid in \
   "{ $fake [ c ] [ s ] o 3000 200 400 20 0 }"; do
   prepare invalid-$RANDOM
   deployment=$invalid
-  launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+  launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
   [[ ! -f $state/s/fixture.backend-environment ]]
 done
 
 # Backend startup failure is bounded and creates no pair sockets.
 prepare partial
 mkdir -p "$state_root"; touch "$state_root/fail-before-ready"
-launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
 assert_admission_closed
 
 # Readiness rejects each exit-zero false report.
 for mode in status-not-running status-malformed status-incompatible status-wrong-socket status-wrong-session; do
   prepare ready-$mode
   mkdir -p "$state_root"; touch "$state_root/$mode"
-  launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
+  launch; wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
   assert_admission_closed
 done
 
@@ -309,7 +320,7 @@ for role in backend core translator; do
   done
   [[ -n $target ]]
   kill "$target"
-  wait_exit "$pair_pid"; ! wait "$pair_pid"
+  wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
   for child in "${children[@]}"; do wait_exit "$child"; done
   assert_admission_closed
 done
