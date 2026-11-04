@@ -67,7 +67,7 @@ pub struct Bootstrap {
     public: std::sync::Mutex<Option<OwnedListener>>,
     public_ready: std::sync::Condvar,
     admission: herdr_nexus_wire::ValidAdmission,
-    translator_peer: shared_translator::PeerIdentity,
+    translator_peer: BoundPeer,
 }
 
 impl Bootstrap {
@@ -85,7 +85,7 @@ impl Bootstrap {
             public: std::sync::Mutex::new(None),
             public_ready: std::sync::Condvar::new(),
             admission,
-            translator_peer,
+            translator_peer: BoundPeer::capture(translator_peer)?,
         })
     }
 
@@ -149,15 +149,13 @@ impl Bootstrap {
                 .map(|(stream, _)| stream)?;
             let actual = herdr_nexus_wire::frame::peer_caller(&stream)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            if actual.user_id == self.translator_peer.user_id
-                && actual.process_id == self.translator_peer.process_id
-            {
+            if self.translator_peer.matches(&actual) {
                 return Ok(AcceptedPublic { stream, authority: PublicAuthority::Translator });
             }
             match self.store.peer_for(&actual) {
-                Some(peer_id) => return Ok(AcceptedPublic {
+                Some((peer_id, generation)) => return Ok(AcceptedPublic {
                     stream,
-                    authority: PublicAuthority::Peer(peer_id),
+                    authority: PublicAuthority::Peer { peer_id, generation },
                 }),
                 None => eprintln!("herdr Nexus rejected unconfigured public peer"),
             }
@@ -181,16 +179,47 @@ pub struct AcceptedPublic {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PublicAuthority {
     Translator,
-    Peer(shared_translator::PeerId),
+    Peer { peer_id: shared_translator::PeerId, generation: u64 },
+}
+
+impl PublicAuthority {
+    pub fn peer_grant(&self) -> Option<(shared_translator::PeerId, u64)> {
+        match self {
+            Self::Translator => None,
+            Self::Peer { peer_id, generation } => Some((peer_id.clone(), *generation)),
+        }
+    }
+}
+
+pub fn principal_for(
+    authority: &PublicAuthority,
+    actual: &herdr_nexus_wire::transport_types::Caller,
+    serialized: &herdr_nexus_wire::transport_types::Caller,
+) -> std::io::Result<shared_translator::Principal> {
+    match authority {
+        PublicAuthority::Translator => Ok(shared_translator::Principal::Login(
+            serialized.user_id.clone(),
+        )),
+        PublicAuthority::Peer { peer_id, .. }
+            if serialized.user_id == actual.user_id
+                && serialized.process_id == actual.process_id =>
+        {
+            Ok(shared_translator::Principal::Peer(peer_id.clone()))
+        }
+        PublicAuthority::Peer { .. } => Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "configured peer serialized a different Caller",
+        )),
+    }
 }
 
 fn require_peer(
     stream: &std::os::unix::net::UnixStream,
-    expected: &shared_translator::PeerIdentity,
+    expected: &BoundPeer,
 ) -> std::io::Result<()> {
     let actual = herdr_nexus_wire::frame::peer_caller(stream)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    if actual.user_id == expected.user_id && actual.process_id == expected.process_id {
+    if expected.matches(&actual) {
         Ok(())
     } else {
         Err(std::io::Error::new(
@@ -717,6 +746,17 @@ impl Dispatcher {
         session: signal_herdr_nexus::Session,
         configuration: Arc<ReadyCoreConfiguration>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        self.subscribe_bound(stream, principal, None, session, configuration)
+    }
+
+    pub fn subscribe_bound(
+        self: &Arc<Self>,
+        stream: std::os::unix::net::UnixStream,
+        principal: shared_translator::Principal,
+        peer_grant: Option<(shared_translator::PeerId, u64)>,
+        session: signal_herdr_nexus::Session,
+        configuration: Arc<ReadyCoreConfiguration>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use signal_herdr_nexus::{Changed_Data, Response};
         let (acknowledgement, current) = {
             let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -748,7 +788,16 @@ impl Dispatcher {
         }
         self.configuration.register_subscriber(&queue);
         if let shared_translator::Principal::Peer(peer_id) = &principal {
-            self.configuration.register_peer_subscriber(peer_id, &queue);
+            let Some((granted_id, generation)) = peer_grant else {
+                queue.close();
+                return Err("configured peer subscription lacks its binding generation".into());
+            };
+            if granted_id != *peer_id
+                || !self.configuration.register_peer_subscriber(peer_id, generation, &queue)
+            {
+                queue.close();
+                return Err("configured peer binding changed before subscription registration".into());
+            }
         }
         let writer_queue = Arc::clone(&queue);
         let writer_configuration = Arc::clone(&self.configuration);
@@ -1276,19 +1325,43 @@ pub struct ConfigurationStore {
     subscriber_queues: std::sync::Mutex<Vec<std::sync::Weak<SubscriberQueue>>>,
     peer_subscriber_queues: std::sync::Mutex<std::collections::HashMap<shared_translator::PeerId, Vec<std::sync::Weak<SubscriberQueue>>>>,
     peers: std::sync::Mutex<std::collections::HashMap<shared_translator::PeerId, BoundPeer>>,
+    next_peer_generation: std::sync::atomic::AtomicU64,
 }
 
 struct BoundPeer {
     identity: shared_translator::PeerIdentity,
     pidfd: std::os::fd::OwnedFd,
+    generation: u64,
+}
+
+impl BoundPeer {
+    fn capture(identity: shared_translator::PeerIdentity) -> std::io::Result<Self> {
+        let pid = i32::try_from(identity.process_id.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .ok_or_else(|| std::io::Error::other("peer process id is invalid"))?;
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
+        Ok(Self { identity, pidfd, generation: 0 })
+    }
+
+    fn matches(&self, caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
+        use std::os::fd::AsFd;
+        if self.identity.user_id != caller.user_id || self.identity.process_id != caller.process_id {
+            return false;
+        }
+        let mut poll = [nix::poll::PollFd::new(
+            self.pidfd.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        matches!(nix::poll::poll(&mut poll, 0_u8), Ok(0))
+    }
 }
 
 impl ConfigurationStore {
     fn peer_for(
         &self,
         caller: &herdr_nexus_wire::transport_types::Caller,
-    ) -> Option<shared_translator::PeerId> {
-        use std::os::fd::AsFd;
+    ) -> Option<(shared_translator::PeerId, u64)> {
         let peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
         peers.iter().find_map(|(peer_id, peer)| {
             if peer.identity.user_id != caller.user_id
@@ -1296,14 +1369,7 @@ impl ConfigurationStore {
             {
                 return None;
             }
-            let mut poll = [nix::poll::PollFd::new(
-                peer.pidfd.as_fd(),
-                nix::poll::PollFlags::POLLIN,
-            )];
-            match nix::poll::poll(&mut poll, 0_u8) {
-                Ok(0) => Some(peer_id.clone()),
-                _ => None,
-            }
+            peer.matches(caller).then(|| (peer_id.clone(), peer.generation))
         })
     }
 
@@ -1441,23 +1507,23 @@ impl ConfigurationStore {
                         )));
                     }
                 };
-                let replaced = self.peers
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
+                let generation = self.next_peer_generation
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    .wrapping_add(1);
+                let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+                let replaced = peers
                     .insert(binding.peer_id, BoundPeer {
                         identity: binding.peer_identity,
                         pidfd,
+                        generation,
                     });
                 if replaced.is_some() {
                     self.close_peer_subscriptions(&applied);
                 }
             }
             core_meta_herdr_nexus::CoreSet::RemovePeer(peer_id) => {
-                if self.peers
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .remove(&peer_id)
-                    .is_none()
+                let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+                if peers.remove(&peer_id).is_none()
                 {
                     return Response::ConfigureRefused(ConfigurationRefusal::UnknownPeer(peer_id));
                 }
@@ -1489,13 +1555,19 @@ impl ConfigurationStore {
         }
     }
 
-    fn register_peer_subscriber(&self, peer_id: &shared_translator::PeerId, queue: &Arc<SubscriberQueue>) {
+    fn register_peer_subscriber(&self, peer_id: &shared_translator::PeerId, generation: u64, queue: &Arc<SubscriberQueue>) -> bool {
+        let peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+        if peers.get(peer_id).map(|peer| peer.generation) != Some(generation) {
+            queue.close();
+            return false;
+        }
         self.peer_subscriber_queues
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .entry(peer_id.clone())
             .or_default()
             .push(Arc::downgrade(queue));
+        true
     }
 
     pub fn snapshot(&self) -> Option<Arc<ReadyCoreConfiguration>> {
@@ -1639,7 +1711,7 @@ mod tests {
                 group_id: shared_translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
                 process_id: ProcessId(i64::from(std::process::id())),
             }),
-            Some(peer_id.clone())
+            Some((peer_id.clone(), 1))
         );
         assert!(matches!(
             store.configure(CoreSet::RemovePeer(peer_id.clone()), || Ok(())),
@@ -1651,6 +1723,116 @@ mod tests {
                 meta_signal_herdr_nexus::ConfigurationRefusal::UnknownPeer(peer_id)
             )
         );
+    }
+
+    #[test]
+    fn exited_pidfd_binding_is_not_admitted() {
+        use core_meta_herdr_nexus::CoreSet;
+        use shared_translator::{PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("fixture child");
+        let store = ConfigurationStore::default();
+        let peer_id = PeerId("short-lived".into());
+        let identity = PeerIdentity {
+            user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: ProcessId(i64::from(child.id())),
+        };
+        assert!(matches!(
+            store.configure(CoreSet::Peer(PeerBinding {
+                peer_id,
+                peer_identity: identity.clone(),
+            }), || Ok(())),
+            core_meta_herdr_nexus::Response::Configured(_)
+        ));
+        child.kill().expect("terminate fixture child");
+        child.wait().expect("reap fixture child");
+        assert_eq!(
+            store.peer_for(&herdr_nexus_wire::transport_types::Caller {
+                user_id: identity.user_id,
+                group_id: shared_translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
+                process_id: identity.process_id,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn configured_peer_cannot_forge_the_serialized_caller() {
+        use shared_translator::{GroupId, PeerId, ProcessId, UserId};
+        let actual = herdr_nexus_wire::transport_types::Caller {
+            user_id: UserId(1000),
+            group_id: GroupId(1000),
+            process_id: ProcessId(42),
+        };
+        let forged = herdr_nexus_wire::transport_types::Caller {
+            process_id: ProcessId(43),
+            ..actual.clone()
+        };
+        assert_eq!(
+            principal_for(
+                &PublicAuthority::Peer { peer_id: PeerId("peer".into()), generation: 1 },
+                &actual,
+                &actual,
+            ).expect("matching kernel Caller"),
+            shared_translator::Principal::Peer(PeerId("peer".into()))
+        );
+        assert_eq!(
+            principal_for(&PublicAuthority::Peer { peer_id: PeerId("peer".into()), generation: 1 }, &actual, &forged)
+                .expect_err("forged Caller rejected")
+                .kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn peer_rebind_closes_old_binding_subscriptions() {
+        use core_meta_herdr_nexus::CoreSet;
+        use shared_translator::{PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        let store = ConfigurationStore::default();
+        let peer_id = PeerId("stable".into());
+        let binding = PeerBinding {
+            peer_id: peer_id.clone(),
+            peer_identity: PeerIdentity {
+                user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
+                process_id: ProcessId(i64::from(std::process::id())),
+            },
+        };
+        assert!(matches!(store.configure(CoreSet::Peer(binding.clone()), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
+        let queue = Arc::new(SubscriberQueue::new(1));
+        assert!(store.register_peer_subscriber(&peer_id, 1, &queue));
+        assert!(queue.is_open());
+        assert!(matches!(store.configure(CoreSet::Peer(binding), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
+        assert!(!queue.is_open());
+    }
+
+    #[test]
+    fn subscription_registration_rejects_a_rebound_generation() {
+        use core_meta_herdr_nexus::CoreSet;
+        use shared_translator::{GroupId, PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        let store = ConfigurationStore::default();
+        let peer_id = PeerId("stable".into());
+        let identity = PeerIdentity {
+            user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: ProcessId(i64::from(std::process::id())),
+        };
+        let binding = PeerBinding { peer_id: peer_id.clone(), peer_identity: identity.clone() };
+        assert!(matches!(store.configure(CoreSet::Peer(binding.clone()), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
+        let caller = herdr_nexus_wire::transport_types::Caller {
+            user_id: identity.user_id,
+            group_id: GroupId(i64::from(nix::unistd::getgid().as_raw())),
+            process_id: identity.process_id,
+        };
+        let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
+        assert!(matches!(store.configure(CoreSet::Peer(binding), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
+        let stale = Arc::new(SubscriberQueue::new(1));
+        assert!(!store.register_peer_subscriber(&peer_id, old_generation, &stale));
+        assert!(!stale.is_open());
+        let (_, new_generation) = store.peer_for(&caller).expect("replacement binding admitted");
+        let current = Arc::new(SubscriberQueue::new(1));
+        assert!(store.register_peer_subscriber(&peer_id, new_generation, &current));
+        assert!(current.is_open());
     }
 
     #[test]
@@ -2422,17 +2604,18 @@ mod tests {
         use shared_translator::{PeerIdentity, ProcessId, UserId};
         let (client, _server) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let actual = herdr_nexus_wire::frame::peer_caller(&client).expect("peer credentials");
-        let paired = PeerIdentity {
+        let paired = BoundPeer::capture(PeerIdentity {
             user_id: actual.user_id.clone(),
             process_id: actual.process_id.clone(),
-        };
+        }).expect("capture current process");
         assert!(require_peer(&client, &paired).is_ok());
-        let forged = PeerIdentity {
+        let forged = BoundPeer::capture(PeerIdentity {
             user_id: UserId(actual.user_id.0),
+            process_id: ProcessId(actual.process_id.0),
+        }).expect("capture current process");
+        let mismatched = herdr_nexus_wire::transport_types::Caller {
             process_id: ProcessId(actual.process_id.0 + 1),
+            ..actual
         };
-        assert_eq!(
-            require_peer(&client, &forged).expect_err("unpaired process rejected").kind(),
-            std::io::ErrorKind::PermissionDenied
-        );
+        assert!(!forged.matches(&mismatched));
     }

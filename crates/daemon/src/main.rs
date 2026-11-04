@@ -58,23 +58,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(body))
                         .restore()?;
                 let herdr_nexus_wire::public_call::Query::Call(call) = call;
-                let principal = match authority {
-                    herdr_nexus_daemon::PublicAuthority::Translator => {
-                        shared_translator::Principal::Login(call.caller.user_id.clone())
-                    }
-                    herdr_nexus_daemon::PublicAuthority::Peer(peer_id) => {
-                        let actual = herdr_nexus_wire::frame::peer_caller(&stream)?;
-                        if call.caller.user_id != actual.user_id
-                            || call.caller.process_id != actual.process_id
-                        {
-                            return Err("configured peer serialized a different Caller".into());
-                        }
-                        shared_translator::Principal::Peer(peer_id)
-                    }
-                };
+                let actual = herdr_nexus_wire::frame::peer_caller(&stream)?;
+                let peer_grant = authority.peer_grant();
+                let principal = herdr_nexus_daemon::principal_for(&authority, &actual, &call.caller)?;
                 let query = call.input.0;
                 if let signal_herdr_nexus::Query::Subscribe(session) = query {
-                    return dispatcher.subscribe_as(stream, principal, session, configuration);
+                    return dispatcher.subscribe_bound(stream, principal, peer_grant, session, configuration);
                 }
                 let response = dispatcher.dispatch_as(principal, query, Arc::clone(&configuration));
                 let response = herdr_nexus_wire::public_call::Response::Answered(

@@ -221,6 +221,7 @@ dependencies = [
  "nix",
  "protos",
  "rkyv",
+ "rustix",
  "serde",
  "serde_json",
  "signal",

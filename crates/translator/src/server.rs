@@ -25,6 +25,34 @@ pub enum Endpoint {
     Meta,
 }
 
+struct NexusPeer {
+    identity: shared_translator::PeerIdentity,
+    pidfd: std::os::fd::OwnedFd,
+}
+
+impl NexusPeer {
+    fn capture(identity: shared_translator::PeerIdentity) -> std::io::Result<Self> {
+        let pid = i32::try_from(identity.process_id.0)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
+            .ok_or_else(|| std::io::Error::other("paired Nexus process id is invalid"))?;
+        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
+        Ok(Self { identity, pidfd })
+    }
+
+    fn matches(&self, caller: &crate::transport_types::Caller) -> bool {
+        use std::os::fd::AsFd;
+        if self.identity.user_id != caller.user_id || self.identity.process_id != caller.process_id {
+            return false;
+        }
+        let mut poll = [nix::poll::PollFd::new(
+            self.pidfd.as_fd(),
+            nix::poll::PollFlags::POLLIN,
+        )];
+        matches!(nix::poll::poll(&mut poll, 0_u8), Ok(0))
+    }
+}
+
 pub fn run(
     bootstrap: &herdr_nexus_wire::transport_types::TranslatorBootstrap,
 ) -> Result<(), ServerError> {
@@ -40,8 +68,10 @@ pub fn run(
     let meta =
         OwnedSocket::bind(Path::new(&place.directory.0).join(names.meta_translator_socket.0))?;
     let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
-    let nexus_peer = bootstrap.peer_identity.clone();
-    let meta_peer = nexus_peer.clone();
+    let nexus_peer = std::sync::Arc::new(
+        NexusPeer::capture(bootstrap.peer_identity.clone()).map_err(ServerError::Io)?
+    );
+    let meta_peer = std::sync::Arc::clone(&nexus_peer);
     let meta_configuration = std::sync::Arc::clone(&configuration);
     let meta_place = place.clone();
     std::thread::spawn(move || {
@@ -71,7 +101,7 @@ fn serve_listener(
     place: Place,
     endpoint: Endpoint,
     bootstrap: BootstrapMeta,
-    nexus_peer: shared_translator::PeerIdentity,
+    nexus_peer: std::sync::Arc<NexusPeer>,
 ) {
     for stream in bound.listener.incoming() {
         let mut stream = match stream {
@@ -83,7 +113,7 @@ fn serve_listener(
         };
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
-        let nexus_peer = nexus_peer.clone();
+        let nexus_peer = std::sync::Arc::clone(&nexus_peer);
         std::thread::spawn(move || {
             if let Err(error) = serve_one_paired(
                 &mut stream,
@@ -91,7 +121,7 @@ fn serve_listener(
                 &place,
                 endpoint,
                 bootstrap,
-                Some(&nexus_peer),
+                Some(nexus_peer.as_ref()),
             ) {
                 eprintln!("herdr translator request failed: {error}");
             }
@@ -124,7 +154,7 @@ fn serve_one_paired(
     place: &Place,
     endpoint: Endpoint,
     bootstrap: BootstrapMeta,
-    nexus_peer: Option<&shared_translator::PeerIdentity>,
+    nexus_peer: Option<&NexusPeer>,
 ) -> Result<(), ServerError> {
     use crate::transport::{self, Frame};
     use crate::transport_types::{Kind, Lane};
@@ -163,9 +193,7 @@ fn serve_one_paired(
         );
     }
     if request.lane == Lane::EmissionSignal
-        && !nexus_peer.is_some_and(|expected| {
-            caller.user_id == expected.user_id && caller.process_id == expected.process_id
-        })
+        && !nexus_peer.is_some_and(|expected| expected.matches(&caller))
     {
         return write_failed_frame(
             &mut io,
@@ -1475,10 +1503,11 @@ mod tests {
             metaflow_name: shared_translator::placement::MetaflowName("test".into()),
             directory: shared_translator::placement::Directory("/tmp".into()),
         };
-        let expected = PeerIdentity {
+        let mut expected = NexusPeer::capture(PeerIdentity {
             user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
-            process_id: ProcessId(i64::from(std::process::id()) + 1),
-        };
+            process_id: ProcessId(i64::from(std::process::id())),
+        }).expect("current pidfd");
+        expected.identity.process_id = ProcessId(i64::from(std::process::id()) + 1);
         serve_one_paired(
             &mut server,
             &TranslatorConfiguration::default(),
@@ -1779,5 +1808,25 @@ mod tests {
         front.join().expect("front thread");
         core.join().expect("core thread");
         std::fs::remove_dir_all(directory).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn exited_paired_nexus_pidfd_is_rejected() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("fixture child");
+        let identity = shared_translator::PeerIdentity {
+            user_id: shared_translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: shared_translator::ProcessId(i64::from(child.id())),
+        };
+        let peer = NexusPeer::capture(identity.clone()).expect("pidfd capture");
+        child.kill().expect("terminate fixture child");
+        child.wait().expect("reap fixture child");
+        assert!(!peer.matches(&crate::transport_types::Caller {
+            user_id: identity.user_id,
+            group_id: shared_translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
+            process_id: identity.process_id,
+        }));
     }
 }
