@@ -26,12 +26,36 @@
           cargoExtraArgs = "--workspace --all-features";
         };
       in {
-        packages.default = rust.craneLib.buildPackage {
+        packages = rec {
+        daemon = rust.craneLib.buildPackage {
+          pname = "herdr-nexus-daemon";
+          version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
-          cargoExtraArgs = "--workspace --all-features";
+          cargoExtraArgs = "-p herdr-nexus-daemon --bin herdr-nexus-daemon --no-default-features";
+        };
+        translator = rust.craneLib.buildPackage {
+          pname = "herdr-translator";
+          version = "0.1.0";
+          src = source;
+          inherit cargoArtifacts;
+          cargoExtraArgs = "-p herdr-nexus-translator --bin herdr-translator --no-default-features";
+        };
+        cli = rust.craneLib.buildPackage {
+          pname = "herdr-nexus-cli";
+          version = "0.1.0";
+          src = source;
+          inherit cargoArtifacts;
+          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-nexus --bin herdr-nexus-meta --bin herdr-nexus-place";
+        };
+        default = pkgs.symlinkJoin {
+          name = "herdr-nexus-v1";
+          paths = [ daemon translator cli ];
+        };
         };
         checks.test = rust.craneLib.cargoTest {
+          pname = "herdr-nexus-test";
+          version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
           cargoTestExtraArgs = "--workspace --all-features";

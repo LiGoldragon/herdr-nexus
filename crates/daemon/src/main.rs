@@ -6,7 +6,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let place = {
         let mut input = std::io::stdin().lock();
         let body = input.read_frame(bootstrap_capacity)?;
-        Signal::<shared_translator::placement::Place>::from(Vec::<u8>::from(body)).restore()?
+        let place =
+            Signal::<shared_translator::placement::Place>::from(Vec::<u8>::from(body)).restore()?;
+        drop(input);
+        nix::unistd::close(0)?;
+        place
     };
     let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(&place)?);
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(bootstrap.paths()));

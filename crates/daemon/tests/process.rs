@@ -7,6 +7,7 @@ use signal::{FrameCapacity, FrameReading, FrameWriting, Restorable, Signal, Sign
 use signal_herdr_nexus::{
     Name, Outcome, Pane, PaneId, Query, Response, Root, Session, Value, Variable, Workspace,
 };
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -72,12 +73,17 @@ fn binary_bootstrap_configures_and_dispatches_through_running_daemon() {
         .spawn()
         .expect("start daemon");
     let place_signal = place.signalize().expect("archive Place");
-    child
-        .stdin
-        .take()
-        .expect("bootstrap stdin")
+    let mut bootstrap = child.stdin.take().expect("bootstrap stdin");
+    let bootstrap_pipe = std::fs::read_link(format!(
+        "/proc/{}/fd/{}",
+        std::process::id(),
+        bootstrap.as_raw_fd()
+    ))
+    .expect("bootstrap pipe identity");
+    bootstrap
         .write_frame(&place_signal, capacity)
         .expect("write Place frame");
+    drop(bootstrap);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut meta = connect_before(
@@ -107,6 +113,14 @@ fn binary_bootstrap_configures_and_dispatches_through_running_daemon() {
     assert_eq!(
         meta_response,
         MetaResponse::Configured(ConfigureOutcome::Succeeded)
+    );
+    assert!(
+        std::fs::read_dir(format!("/proc/{}/fd", child.id()))
+            .expect("child file descriptors")
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .all(|target| target != bootstrap_pipe),
+        "the daemon retained its bootstrap pipe"
     );
 
     let mut public = connect_before(

@@ -171,6 +171,7 @@ dependencies = [
  "emission-herdr-nexus",
  "herdr-nexus-core",
  "meta-signal-herdr-nexus",
+ "nix",
  "signal",
  "signal-herdr-nexus",
  "translator",
