@@ -11,8 +11,10 @@ Emission. Ethos-zero is unchanged.
 The current `InMemory` backend is explicitly nondurable and provides no
 restart recovery. Subscriptions acknowledge before delivering changes, carry
 no durable event history, and write each change directly with the configured
-deadline. A disconnected reader obtains current state with `List` before
-subscribing again.
+deadline. All subscribers to one session share one complete-snapshot poll
+source. Successful disappearance emits `Dead` once; refused or uncertain polls
+preserve the last verified state. A disconnected reader obtains current state
+with `List` before subscribing again.
 
 Build the full check through Nix:
 

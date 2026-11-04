@@ -226,6 +226,21 @@ where
 pub struct Dispatcher {
     core: std::sync::Mutex<herdr_nexus_core::Core<herdr_nexus_core::InMemory>>,
     translator_socket: std::path::PathBuf,
+    subscriptions: std::sync::Mutex<SubscriptionHub>,
+    next_subscription_generation: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Default)]
+struct SubscriptionHub {
+    sessions: std::collections::HashMap<signal_herdr_nexus::Session, SessionSubscription>,
+}
+
+struct SessionSubscription {
+    generation: u64,
+    configuration: Arc<RuntimeConfiguration>,
+    previous:
+        Option<std::collections::HashMap<signal_herdr_nexus::Pane, signal_herdr_nexus::State>>,
+    subscribers: Vec<std::os::unix::net::UnixStream>,
 }
 
 impl Dispatcher {
@@ -235,6 +250,8 @@ impl Dispatcher {
                 herdr_nexus_core::InMemory::default(),
             )),
             translator_socket: paths.translator.clone(),
+            subscriptions: std::sync::Mutex::new(SubscriptionHub::default()),
+            next_subscription_generation: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -330,18 +347,17 @@ impl Dispatcher {
         }
     }
 
-    /// A subscription is an acknowledged, nondurable stream. A complete List
-    /// establishes and advances its state; uncertain/refused polls leave the
-    /// previous state intact. Delivery is direct and serialized on this stream,
-    /// so a failed or slow subscriber is removed simply by ending the call.
+    /// Registers a nondurable stream in the session's shared poll source. The
+    /// hub serializes acknowledgement and direct event writes under one lock;
+    /// there is no delivery queue.
     pub fn subscribe(
-        &self,
+        self: &Arc<Self>,
         stream: std::os::unix::net::UnixStream,
         session: signal_herdr_nexus::Session,
         configuration: Arc<RuntimeConfiguration>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use signal::{FrameWriting, Signalizable};
-        use signal_herdr_nexus::{Changed_Data, Outcome, Query, Response};
+        use signal_herdr_nexus::Response;
         let capacity = signal::FrameCapacity::from(configuration.frame_capacity_bytes);
         let acknowledgement = {
             let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
@@ -351,34 +367,125 @@ impl Dispatcher {
             ))
         };
         let mut output = DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+        let mut hub = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         output.write_frame(&acknowledgement.signalize()?, capacity)?;
+        if let Some(existing) = hub.sessions.get_mut(&session) {
+            existing.subscribers.push(stream);
+            return Ok(());
+        }
+        let generation = self
+            .next_subscription_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        hub.sessions.insert(
+            session.clone(),
+            SessionSubscription {
+                generation,
+                configuration: Arc::clone(&configuration),
+                previous: None,
+                subscribers: vec![stream],
+            },
+        );
+        drop(hub);
+        let dispatcher = Arc::clone(self);
+        std::thread::spawn(move || dispatcher.poll_subscription(session, generation));
+        Ok(())
+    }
 
-        let mut previous = std::collections::HashMap::new();
+    fn poll_subscription(self: Arc<Self>, session: signal_herdr_nexus::Session, generation: u64) {
+        use signal_herdr_nexus::{Changed_Data, Outcome, Query, Response};
         loop {
-            std::thread::sleep(configuration.polling);
-            let response = self.dispatch(Query::List(session.clone()), Arc::clone(&configuration));
-            let Response::Listed(Outcome::Listed(known)) = response else {
-                continue;
+            let configuration = {
+                let hub = self
+                    .subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(subscription) = hub.sessions.get(&session) else {
+                    return;
+                };
+                if subscription.generation != generation {
+                    return;
+                }
+                Arc::clone(&subscription.configuration)
             };
-            let current: std::collections::HashMap<_, _> = known
-                .into_iter()
-                .map(|known| (known.pane, known.state))
-                .collect();
-            if !previous.is_empty() {
-                for (pane, state) in &current {
-                    if previous.get(pane) != Some(state) {
-                        let changed = Response::Changed(Changed_Data {
-                            pane: pane.clone(),
-                            state: state.clone(),
-                        });
-                        output =
-                            DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
-                        output.write_frame(&changed.signalize()?, capacity)?;
-                    }
+            std::thread::sleep(configuration.polling);
+            {
+                let mut hub = self
+                    .subscriptions
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(subscription) = hub.sessions.get_mut(&session) else {
+                    return;
+                };
+                if subscription.generation != generation {
+                    return;
+                }
+                subscription.subscribers.retain(subscriber_connected);
+                if subscription.subscribers.is_empty() {
+                    hub.sessions.remove(&session);
+                    return;
                 }
             }
-            previous = current;
+            let response = self.dispatch(Query::List(session.clone()), Arc::clone(&configuration));
+            let complete = match response {
+                Response::Listed(Outcome::Listed(known)) => Some(
+                    known
+                        .into_iter()
+                        .map(|known| (known.pane, known.state))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                ),
+                _ => None,
+            };
+            let mut hub = self
+                .subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let Some(subscription) = hub.sessions.get_mut(&session) else {
+                return;
+            };
+            if subscription.generation != generation {
+                return;
+            }
+            if let Some(current) = complete {
+                let changes = subscription
+                    .previous
+                    .as_ref()
+                    .map(|previous| {
+                        current
+                            .iter()
+                            .filter(|(pane, state)| previous.get(*pane) != Some(*state))
+                            .map(|(pane, state)| {
+                                Response::Changed(Changed_Data {
+                                    pane: pane.clone(),
+                                    state: state.clone(),
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                for change in changes {
+                    subscription.subscribers.retain_mut(|stream| {
+                        write_subscription_change(stream, &configuration, &change).is_ok()
+                    });
+                }
+                subscription.previous = Some(current);
+            }
+            if subscription.subscribers.is_empty() {
+                hub.sessions.remove(&session);
+                return;
+            }
         }
+    }
+
+    #[cfg(test)]
+    fn subscription_source_count(&self) -> usize {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sessions
+            .len()
     }
 
     fn execute(
@@ -410,6 +517,40 @@ impl Dispatcher {
         })();
         result.unwrap_or(emission_herdr_nexus::ExternalOutcome::Uncertain)
     }
+}
+
+fn subscriber_connected(stream: &std::os::unix::net::UnixStream) -> bool {
+    use std::io::Read;
+    let Ok(mut probe) = stream.try_clone() else {
+        return false;
+    };
+    if probe.set_nonblocking(true).is_err() {
+        return false;
+    }
+    let mut byte = [0_u8; 1];
+    match probe.read(&mut byte) {
+        Ok(0) => false,
+        // A subscription is server-to-client after its one query. Any further
+        // client byte is a protocol violation, so consuming it and removing
+        // the subscriber is the wanted behavior.
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+        Err(_) => false,
+    }
+}
+
+fn write_subscription_change(
+    stream: &std::os::unix::net::UnixStream,
+    configuration: &RuntimeConfiguration,
+    change: &signal_herdr_nexus::Response,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use signal::{FrameWriting, Signalizable};
+    let mut output = DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+    output.write_frame(
+        &change.signalize()?,
+        signal::FrameCapacity::from(configuration.frame_capacity_bytes),
+    )?;
+    Ok(())
 }
 
 fn done_result(
@@ -654,10 +795,11 @@ mod tests {
     }
 
     #[test]
-    fn subscription_acknowledges_then_emits_only_complete_snapshot_changes() {
+    fn one_shared_subscription_source_delivers_dead_once_and_reappearance() {
         use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
         use signal_herdr_nexus::{
-            Changed_Data, Label, Outcome, Pane, PaneId, Response, Root, Session, State, Workspace,
+            Changed_Data, ErrorCode, Label, Message, Outcome, Pane, PaneId, Refusal, Response,
+            Root, Session, State, Workspace,
         };
         let (place, directory) = test_place("subscription");
         let paths = SocketPaths::from(&place);
@@ -700,6 +842,8 @@ mod tests {
         let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
         let target = pane.clone();
         let unrelated = other.clone();
+        let poll_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fixture_poll_count = Arc::clone(&poll_count);
         let fixture = std::thread::spawn(move || {
             let outcomes = [
                 ExternalOutcome::Listed(vec![
@@ -713,16 +857,19 @@ mod tests {
                     },
                 ]),
                 ExternalOutcome::Uncertain,
-                ExternalOutcome::Listed(vec![
-                    PaneObservation {
-                        pane: target.clone(),
-                        state: State::Busy,
-                    },
-                    PaneObservation {
-                        pane: unrelated.clone(),
-                        state: State::Idle,
-                    },
-                ]),
+                ExternalOutcome::Refused(Refusal {
+                    error_code: ErrorCode("temporary_list_refusal".into()),
+                    exit_status_option: None,
+                    message: Message("fixture refusal".into()),
+                }),
+                ExternalOutcome::Listed(vec![PaneObservation {
+                    pane: unrelated.clone(),
+                    state: State::Idle,
+                }]),
+                ExternalOutcome::Listed(vec![PaneObservation {
+                    pane: unrelated,
+                    state: State::Busy,
+                }]),
                 ExternalOutcome::Listed(vec![PaneObservation {
                     pane: target,
                     state: State::Idle,
@@ -739,19 +886,30 @@ mod tests {
                         capacity,
                     )
                     .expect("write list outcome");
+                fixture_poll_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
         });
-        let configuration = Arc::new(validate(configuration(10)).expect("valid configuration"));
-        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("subscriber pair");
-        client
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .expect("client timeout");
-        let subscribed = Arc::clone(&dispatcher);
-        let subscription = std::thread::spawn(move || {
-            subscribed
-                .subscribe(server, Session("subscription".into()), configuration)
-                .is_err()
-        });
+        let configuration = Arc::new(validate(configuration(50)).expect("valid configuration"));
+        let (server_one, mut client_one) =
+            std::os::unix::net::UnixStream::pair().expect("first subscriber pair");
+        let (server_two, mut client_two) =
+            std::os::unix::net::UnixStream::pair().expect("second subscriber pair");
+        for client in [&client_one, &client_two] {
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("client timeout");
+        }
+        Arc::clone(&dispatcher)
+            .subscribe(
+                server_one,
+                Session("subscription".into()),
+                Arc::clone(&configuration),
+            )
+            .expect("register first subscriber");
+        Arc::clone(&dispatcher)
+            .subscribe(server_two, Session("subscription".into()), configuration)
+            .expect("register second subscriber");
+        assert_eq!(dispatcher.subscription_source_count(), 1);
         let read_response = |stream: &mut std::os::unix::net::UnixStream| {
             let body = stream
                 .read_frame(capacity)
@@ -760,20 +918,39 @@ mod tests {
                 .restore()
                 .expect("restore subscription frame")
         };
-        assert_eq!(
-            read_response(&mut client),
-            Response::Subscribed(Outcome::Done)
-        );
-        assert_eq!(
-            read_response(&mut client),
-            Response::Changed(Changed_Data {
-                pane: pane.clone(),
-                state: State::Busy,
-            })
-        );
-        drop(client);
-        assert!(subscription.join().expect("subscription thread"));
+        for client in [&mut client_one, &mut client_two] {
+            assert_eq!(read_response(client), Response::Subscribed(Outcome::Done));
+        }
+        for client in [&mut client_one, &mut client_two] {
+            assert_eq!(
+                read_response(client),
+                Response::Changed(Changed_Data {
+                    pane: pane.clone(),
+                    state: State::Dead,
+                })
+            );
+        }
+        assert!(poll_count.load(std::sync::atomic::Ordering::SeqCst) >= 4);
+        for client in [&mut client_one, &mut client_two] {
+            assert_eq!(
+                read_response(client),
+                Response::Changed(Changed_Data {
+                    pane: pane.clone(),
+                    state: State::Idle,
+                })
+            );
+        }
         fixture.join().expect("translator fixture");
+        assert_eq!(poll_count.load(std::sync::atomic::Ordering::SeqCst), 6);
+        drop(client_one);
+        drop(client_two);
+        for _ in 0..40 {
+            if dispatcher.subscription_source_count() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(dispatcher.subscription_source_count(), 0);
         drop(dispatcher);
         std::fs::remove_file(&paths.translator).expect("remove fixture socket");
         std::fs::remove_dir(directory).expect("remove fixture directory");
