@@ -75,7 +75,7 @@ wait_exit() {
 wait_backend() {
   local session; session=$(session_name)
   for _ in $(seq 1 300); do
-    [[ -f $state_root/fixture.environment && \
+    [[ -f $state_root/fixture.backend-environment && \
        -S $config_root/herdr/sessions/$session/herdr.sock && \
        -S $config_root/herdr/sessions/$session/herdr-client.sock ]] && return 0
     kill -0 "$pair_pid" 2>/dev/null || break
@@ -127,38 +127,17 @@ configure_ready() {
   [[ $output == *Ready* ]]
 }
 
-assert_environment() {
-  local backend_pid config_value state_value config_fd state_fd
-  backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
-  config_value=$(sed -n 's/^XDG_CONFIG_HOME=//p' "$state_root/fixture.environment")
-  state_value=$(sed -n 's/^XDG_STATE_HOME=//p' "$state_root/fixture.environment")
-  [[ $config_value =~ ^/proc/self/fd/([0-9]+)$ ]]; config_fd=${BASH_REMATCH[1]}
-  [[ $state_value =~ ^/proc/self/fd/([0-9]+)$ ]]; state_fd=${BASH_REMATCH[1]}
-  [[ $(readlink "/proc/$backend_pid/fd/$config_fd") == "$config_root" ]]
-  [[ $(readlink "/proc/$backend_pid/fd/$state_fd") == "$state_root" ]]
-  grep -Fx "HOME=$case_root/home" "$state_root/fixture.environment"
-  grep -Fx 'HERDR_CONFIG_PATH=<unset>' "$state_root/fixture.environment"
-  grep -Fx 'HERDR_SOCKET_PATH=<unset>' "$state_root/fixture.environment"
-  grep -Fx 'HERDR_CLIENT_SOCKET_PATH=<unset>' "$state_root/fixture.environment"
-  grep -Fx 'HERDR_SESSION=<unset>' "$state_root/fixture.environment"
-}
-
-assert_translator_environment() {
-  local child executable translator_pid= environment config_value state_value config_fd state_fd
-  for child in "$@"; do
-    executable=$(readlink "/proc/$child/exe")
-    [[ $executable == *herdr-translator ]] && translator_pid=$child
-  done
-  [[ -n $translator_pid ]]
-  environment=$(tr '\0' '\n' <"/proc/$translator_pid/environ")
-  config_value=$(sed -n 's/^XDG_CONFIG_HOME=//p' <<<"$environment")
-  state_value=$(sed -n 's/^XDG_STATE_HOME=//p' <<<"$environment")
-  [[ $config_value =~ ^/proc/self/fd/([0-9]+)$ ]]; config_fd=${BASH_REMATCH[1]}
-  [[ $state_value =~ ^/proc/self/fd/([0-9]+)$ ]]; state_fd=${BASH_REMATCH[1]}
-  [[ $(readlink "/proc/$translator_pid/fd/$config_fd") == "$config_root" ]]
-  [[ $(readlink "/proc/$translator_pid/fd/$state_fd") == "$state_root" ]]
-  grep -Fx "HOME=$case_root/home" <<<"$environment"
-  ! grep -Eq '^HERDR_(CONFIG_PATH|SOCKET_PATH|CLIENT_SOCKET_PATH|SESSION)=' <<<"$environment"
+assert_environment_file() {
+  local record=$1
+  grep -Eq '^XDG_CONFIG_HOME=/proc/self/fd/[0-9]+$' "$record"
+  grep -Eq '^XDG_STATE_HOME=/proc/self/fd/[0-9]+$' "$record"
+  grep -Fx "XDG_CONFIG_HOME_TARGET=$config_root" "$record"
+  grep -Fx "XDG_STATE_HOME_TARGET=$state_root" "$record"
+  grep -Fx "HOME=$case_root/home" "$record"
+  grep -Fx 'HERDR_CONFIG_PATH=<unset>' "$record"
+  grep -Fx 'HERDR_SOCKET_PATH=<unset>' "$record"
+  grep -Fx 'HERDR_CLIENT_SOCKET_PATH=<unset>' "$record"
+  grep -Fx 'HERDR_SESSION=<unset>' "$record"
 }
 
 stop_pair() {
@@ -187,10 +166,14 @@ touch "$config_root/herdr/sessions/unrelated/keep"
 launch
 require_backend_ready
 configure_ready positive
-assert_environment
+assert_environment_file "$state_root/fixture.backend-environment"
+workspace=$case_root/workspace
+mkdir -p "$workspace"
+XDG_RUNTIME_DIR=$case_root/run "$package/bin/herdr-nexus" positive \
+  "Create.{ positive $workspace [] }" | grep -q 'Created.Created'
+assert_environment_file "$state_root/fixture.client-environment"
 read -r -a positive_children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
 [[ ${#positive_children[@]} -eq 3 ]]
-assert_translator_environment "${positive_children[@]}"
 stop_pair
 assert_no_children "${positive_children[@]}"
 [[ -f $state/unrelated-state ]]
@@ -246,7 +229,7 @@ for invalid in \
   prepare invalid-$RANDOM
   deployment=$invalid
   launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-  [[ ! -f $state/backend-state/fixture.environment ]]
+  [[ ! -f $state/backend-state/fixture.backend-environment ]]
 done
 
 # Backend startup failure is bounded and creates no pair sockets.

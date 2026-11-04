@@ -78,15 +78,20 @@ static int read_pid(pid_t *pid) {
   *pid = (pid_t)value; return 0;
 }
 
-static int record_environment(const char *state) {
+static int record_environment(const char *state, const char *name) {
   char path[4096];
-  if (join(path, sizeof path, state, "fixture.environment") < 0) return -1;
+  if (join(path, sizeof path, state, name) < 0) return -1;
   FILE *output = fopen(path, "w"); if (!output) return -1;
   const char *names[] = {"XDG_CONFIG_HOME", "XDG_STATE_HOME", "HOME",
     "HERDR_CONFIG_PATH", "HERDR_SOCKET_PATH", "HERDR_CLIENT_SOCKET_PATH", "HERDR_SESSION"};
   for (size_t i = 0; i < sizeof names / sizeof names[0]; ++i) {
     const char *value = getenv(names[i]);
     fprintf(output, "%s=%s\n", names[i], value ? value : "<unset>");
+    if (value && (strcmp(names[i], "XDG_CONFIG_HOME") == 0 ||
+                  strcmp(names[i], "XDG_STATE_HOME") == 0)) {
+      char target[4096]; ssize_t length = readlink(value, target, sizeof target - 1);
+      if (length >= 0) { target[length] = '\0'; fprintf(output, "%s_TARGET=%s\n", names[i], target); }
+    }
   }
   return fclose(output);
 }
@@ -119,7 +124,9 @@ static int emit_status(const char *session, const char *state, int json) {
 }
 
 static int serve(const char *session, const char *config, const char *state) {
-  if (paths(session, config, state) < 0 || record_environment(state) < 0 || has(state, "fail-before-ready")) return 73;
+  if (paths(session, config, state) < 0 ||
+      record_environment(state, "fixture.backend-environment") < 0 ||
+      has(state, "fail-before-ready")) return 73;
   FILE *pid = fopen(pid_path, "wx"); if (!pid) return 74;
   fprintf(pid, "%ld\n", (long)getpid()); if (fclose(pid) != 0) return 74;
   api_fd = bind_unix(api_socket); if (api_fd < 0) { cleanup(); return 75; }
@@ -139,10 +146,12 @@ int main(int argc, char **argv) {
   if (strcmp(argv[3], "status") == 0 && (argc == 5 || argc == 6) && strcmp(argv[4], "server") == 0)
     return emit_status(argv[2], state, argc == 6 && strcmp(argv[5], "--json") == 0);
   if (argc >= 5 && strcmp(argv[3], "workspace") == 0 && strcmp(argv[4], "create") == 0) {
+    if (record_environment(state, "fixture.client-environment") < 0) return 78;
     puts("{\"id\":\"cli:workspace:create\",\"result\":{\"type\":\"workspace_created\",\"workspace\":{},\"tab\":{},\"root_pane\":{\"pane_id\":\"w:p\",\"terminal_id\":\"t\",\"workspace_id\":\"w\",\"tab_id\":\"tab\",\"focused\":true,\"agent_status\":\"unknown\",\"revision\":1}}}");
     return 0;
   }
   if (argc >= 5 && strcmp(argv[3], "agent") == 0 && strcmp(argv[4], "start") == 0) {
+    if (record_environment(state, "fixture.client-environment") < 0) return 78;
     struct timespec delay = {.tv_sec = 0, .tv_nsec = 200000000};
     nanosleep(&delay, NULL);
     puts("{\"id\":\"cli:agent:start\",\"result\":{\"type\":\"agent_started\",\"agent\":{\"terminal_id\":\"t\",\"name\":\"probe\",\"agent\":\"codex\",\"agent_status\":\"idle\",\"workspace_id\":\"w\",\"tab_id\":\"tab\",\"pane_id\":\"w:p\",\"focused\":true,\"interactive_ready\":true,\"revision\":2},\"argv\":[\"codex\"]}}");
