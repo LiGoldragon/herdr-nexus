@@ -74,7 +74,13 @@ fn serve_listener(
     nexus_peer: herdr_nexus_wire::transport_types::PeerIdentity,
 ) {
     for stream in bound.listener.incoming() {
-        let Ok(mut stream) = stream else { continue };
+        let mut stream = match stream {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("herdr translator accept failed: {error}");
+                continue;
+            }
+        };
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         let nexus_peer = nexus_peer.clone();

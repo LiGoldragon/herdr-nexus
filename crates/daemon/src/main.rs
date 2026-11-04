@@ -33,7 +33,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     loop {
-        let stream = bootstrap.accept_public()?;
+        let stream = match bootstrap.accept_public() {
+            Ok(stream) => stream,
+            Err(error) => {
+                eprintln!("herdr Nexus public accept failed: {error}");
+                continue;
+            }
+        };
         let Some(configuration) = bootstrap.snapshot() else {
             continue;
         };

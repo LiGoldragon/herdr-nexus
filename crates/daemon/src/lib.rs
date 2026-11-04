@@ -147,8 +147,9 @@ impl Bootstrap {
                 .listener
                 .accept()
                 .map(|(stream, _)| stream)?;
-            if require_peer(&stream, &self.translator_peer).is_ok() {
-                return Ok(stream);
+            match require_peer(&stream, &self.translator_peer) {
+                Ok(()) => return Ok(stream),
+                Err(error) => eprintln!("herdr Nexus rejected public peer: {error}"),
             }
         }
     }
