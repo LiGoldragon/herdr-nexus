@@ -1875,6 +1875,166 @@ mod tests {
         std::fs::remove_dir(directory).expect("remove fixture directory");
     }
 
+    #[test]
+    fn acknowledgement_loss_unwinds_owned_listener_without_removing_replacement() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-owned-listener-ack-loss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("listener.sock");
+        let retained = directory.join("retained.sock");
+        let owned = OwnedListener::bind(path.clone()).expect("owned listener");
+        let identity = owned.identity().expect("owned identity");
+        let (parent, child) = herdr_nexus_wire::publication::pair().expect("publication pair");
+        let channel = child.prepare_for_spawn().expect("child channel");
+        std::mem::forget(child);
+        let publisher = herdr_nexus_wire::publication::InheritedChannel::validate(
+            &channel,
+            std::time::Duration::from_millis(20),
+        ).expect("validated child channel");
+        std::fs::rename(&path, &retained).expect("move owned socket pathname");
+        let rival = std::os::unix::net::UnixListener::bind(&path).expect("replacement listener");
+        drop(parent);
+        assert!(publisher.publish(
+            herdr_nexus_wire::transport_types::Listener::MetaNexus,
+            identity,
+        ).is_err(), "parent loss must fail publication");
+        drop(owned);
+        assert!(path.exists(), "replacement survives publisher unwind");
+        assert!(retained.exists(), "moved owned socket is preserved as unmatched");
+        drop(rival);
+        std::fs::remove_file(path).expect("remove replacement");
+        std::fs::remove_file(retained).expect("remove retained socket");
+        std::fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn meta_listener_is_nonserving_until_ack_and_parent_loss_removes_matching_socket() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-meta-publication-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("listener.sock");
+        let owned = OwnedListener::bind(path.clone()).expect("owned listener");
+        let identity = owned.identity().expect("owned identity");
+        let (parent, child) = herdr_nexus_wire::publication::pair().expect("publication pair");
+        let channel = child.prepare_for_spawn().expect("child channel");
+        std::mem::forget(child);
+        let publisher = herdr_nexus_wire::publication::InheritedChannel::validate(
+            &channel,
+            Duration::from_secs(1),
+        ).expect("validated child channel");
+        let (result_sender, result_receiver) = std::sync::mpsc::channel();
+        let publishing = std::thread::spawn(move || {
+            result_sender.send(publisher.publish(
+                herdr_nexus_wire::transport_types::Listener::MetaNexus,
+                identity,
+            )).expect("publish result");
+        });
+        parent.receive().expect("meta publication");
+        assert!(result_receiver.try_recv().is_err(), "publisher returned before ACK");
+        let mut client = std::os::unix::net::UnixStream::connect(&path).expect("connect bound listener");
+        client.set_read_timeout(Some(Duration::from_millis(20))).expect("bounded read");
+        let mut byte = [0_u8; 1];
+        assert!(matches!(std::io::Read::read(&mut client, &mut byte), Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)), "meta listener served before ACK");
+        drop(parent);
+        assert!(result_receiver.recv_timeout(Duration::from_secs(1)).expect("publication result").is_err());
+        publishing.join().expect("publisher");
+        drop(client);
+        drop(owned);
+        assert!(!path.exists(), "matching listener removed on publisher unwind");
+        std::fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn public_configuration_waits_for_publication_ack_before_ready_and_service() {
+        use core_meta_herdr_nexus::{CoreSet, Response};
+        use herdr_nexus_wire::transport_types::Listener;
+        use meta_signal_herdr_nexus::{ByteLimit, Readiness, Timeout};
+        use shared_translator::placement::{MetaflowName, Place, Runtime, State};
+
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-public-publication-order-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let place = Place {
+            metaflow_name: MetaflowName("fixture".into()),
+            runtime: Runtime(directory.display().to_string()),
+            state: State(directory.display().to_string()),
+        };
+        let (parent, child) = herdr_nexus_wire::publication::pair().expect("publication pair");
+        let publication_channel = child.prepare_for_spawn().expect("child publication channel");
+        std::mem::forget(child);
+        let (public_bound_sender, public_bound_receiver) = std::sync::mpsc::channel();
+        let (ack_sender, ack_receiver) = std::sync::mpsc::channel();
+        let acknowledger = std::thread::spawn(move || {
+            let meta = parent.receive().expect("meta publication");
+            assert_eq!(meta.listener, Listener::MetaNexus);
+            parent.acknowledge(Listener::MetaNexus).expect("meta acknowledgement");
+            let public = parent.receive().expect("public publication");
+            assert_eq!(public.listener, Listener::PublicNexus);
+            public_bound_sender.send(()).expect("report public bind");
+            ack_receiver.recv().expect("release public acknowledgement");
+            parent.acknowledge(Listener::PublicNexus).expect("public acknowledgement");
+        });
+        let identity = shared_translator::PeerIdentity {
+            user_id: shared_translator::UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: shared_translator::ProcessId(i64::from(std::process::id())),
+        };
+        let bootstrap = Arc::new(Bootstrap::bind(
+            &place,
+            herdr_nexus_wire::ValidAdmission {
+                deadline: Duration::from_secs(1),
+                frame_capacity: signal::MAXIMUM_SIGNAL_BYTES,
+                retry_delay: Duration::from_millis(1),
+            },
+            identity,
+            publication_channel,
+        ).expect("bootstrap after meta acknowledgement"));
+        for setting in [
+            CoreSet::StartTimeout(Timeout(1)),
+            CoreSet::Polling(Timeout(1)),
+            CoreSet::FrameCapacity(ByteLimit(4096)),
+            CoreSet::TransportTimeout(Timeout(10)),
+        ] {
+            assert!(matches!(bootstrap.configure(setting), Response::Configured(_)));
+        }
+        let (response_sender, response_receiver) = std::sync::mpsc::channel();
+        let configuring = {
+            let bootstrap = Arc::clone(&bootstrap);
+            std::thread::spawn(move || {
+                response_sender.send(bootstrap.configure(CoreSet::SubscriberCapacity(8)))
+                    .expect("configuration response");
+            })
+        };
+        public_bound_receiver.recv_timeout(Duration::from_secs(1)).expect("public listener publication");
+        assert!(response_receiver.try_recv().is_err(), "Configure returned before publication ACK");
+        let mut client = std::os::unix::net::UnixStream::connect(directory.join("herdr.sock"))
+            .expect("connect bound but nonserving public listener");
+        client.set_read_timeout(Some(Duration::from_millis(20))).expect("bounded client read");
+        let mut byte = [0_u8; 1];
+        assert!(matches!(std::io::Read::read(&mut client, &mut byte), Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)), "listener served before ACK");
+        ack_sender.send(()).expect("allow public acknowledgement");
+        let response = response_receiver.recv_timeout(Duration::from_secs(1)).expect("Configured after ACK");
+        assert!(matches!(response, Response::Configured(data) if data.readiness == Readiness::Ready));
+        configuring.join().expect("configuration worker");
+        let accepting = {
+            let bootstrap = Arc::clone(&bootstrap);
+            std::thread::spawn(move || bootstrap.accept_public().expect("same listener accepts after ACK"))
+        };
+        drop(client);
+        accepting.join().expect("public accept worker");
+        acknowledger.join().expect("publication acknowledger");
+        drop(bootstrap);
+        std::fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
     fn test_configuration() -> Arc<ReadyCoreConfiguration> {
         Arc::new(ReadyCoreConfiguration {
             polling: Duration::from_millis(10),

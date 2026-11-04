@@ -1574,6 +1574,86 @@ mod tests {
         fs::remove_dir(directory).expect("remove fixture directory");
     }
 
+    #[test]
+    fn acknowledgement_loss_unwinds_owned_socket_without_removing_replacement() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-owned-translator-ack-loss-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("listener.sock");
+        let retained = directory.join("retained.sock");
+        let owned = OwnedSocket::bind(path.clone()).expect("owned socket");
+        let identity = owned.identity().expect("owned identity");
+        let (parent, child) = herdr_nexus_wire::publication::pair().expect("publication pair");
+        let channel = child.prepare_for_spawn().expect("child channel");
+        std::mem::forget(child);
+        let publisher = herdr_nexus_wire::publication::InheritedChannel::validate(
+            &channel,
+            Duration::from_millis(20),
+        ).expect("validated child channel");
+        fs::rename(&path, &retained).expect("move owned socket pathname");
+        let rival = UnixListener::bind(&path).expect("replacement listener");
+        drop(parent);
+        assert!(publisher.publish(
+            herdr_nexus_wire::transport_types::Listener::PublicTranslator,
+            identity,
+        ).is_err(), "parent loss must fail publication");
+        drop(owned);
+        assert!(path.exists(), "replacement survives publisher unwind");
+        assert!(retained.exists(), "moved owned socket is preserved as unmatched");
+        drop(rival);
+        fs::remove_file(path).expect("remove replacement");
+        fs::remove_file(retained).expect("remove retained socket");
+        fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
+    #[test]
+    fn translator_listeners_are_nonserving_until_each_exact_acknowledgement() {
+        use herdr_nexus_wire::transport_types::Listener;
+        for listener in [Listener::PublicTranslator, Listener::MetaTranslator] {
+            let directory = std::env::temp_dir().join(format!(
+                "herdr-translator-publication-order-{}-{}-{:?}",
+                std::process::id(),
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+                listener,
+            ));
+            fs::create_dir(&directory).expect("fixture directory");
+            let path = directory.join("listener.sock");
+            let owned = OwnedSocket::bind(path.clone()).expect("owned socket");
+            let identity = owned.identity().expect("owned identity");
+            let (parent, child) = herdr_nexus_wire::publication::pair().expect("publication pair");
+            let channel = child.prepare_for_spawn().expect("child channel");
+            std::mem::forget(child);
+            let publisher = herdr_nexus_wire::publication::InheritedChannel::validate(
+                &channel,
+                Duration::from_secs(1),
+            ).expect("validated child channel");
+            let (result_sender, result_receiver) = std::sync::mpsc::channel();
+            let published_listener = listener.clone();
+            let publishing = std::thread::spawn(move || {
+                result_sender.send(publisher.publish(published_listener, identity))
+                    .expect("publish result");
+            });
+            let publication = parent.receive().expect("translator publication");
+            assert_eq!(publication.listener, listener);
+            assert!(result_receiver.try_recv().is_err(), "publisher returned before ACK");
+            let mut client = UnixStream::connect(&path).expect("connect bound listener");
+            client.set_read_timeout(Some(Duration::from_millis(20))).expect("bounded read");
+            let mut byte = [0_u8; 1];
+            assert!(matches!(std::io::Read::read(&mut client, &mut byte), Err(error) if matches!(error.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut)), "translator listener served before ACK");
+            parent.acknowledge(listener).expect("exact acknowledgement");
+            result_receiver.recv_timeout(Duration::from_secs(1)).expect("publish result")
+                .expect("publication succeeds after ACK");
+            publishing.join().expect("publisher");
+            drop(client);
+            drop(owned);
+            assert!(!path.exists(), "matching translator listener removed on drop");
+            fs::remove_dir(directory).expect("remove fixture directory");
+        }
+    }
+
     fn test_inherited(fd: &OwnedFd) -> herdr_nexus_wire::transport_types::InheritedDirectory {
         use herdr_nexus_wire::transport_types::*;
         let stat = rustix::fs::fstat(fd).expect("test directory stat");
