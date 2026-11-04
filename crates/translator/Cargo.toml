@@ -31,4 +31,4 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "aae557db87788dbf572e6b9244d8107dedaf76aa"
+rev = "f7f43dc0ab38c7a7e35621ca6d3b6c9d9c75331e"
