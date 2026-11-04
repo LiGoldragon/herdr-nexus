@@ -61,7 +61,7 @@ start_metaflow() {
   local name=$1
   "$package/bin/herdr-pair" "$registry" "$name" \
     "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-    2000 8388608 1048576 64 >"$base/$name-pair.log" 2>&1 &
+    70000 8388608 1048576 64 >"$base/$name-pair.log" 2>&1 &
   pids+=("$!")
   local directory
   directory=$([[ $name == one ]] && printf %s "$one" || printf %s "$two")
