@@ -20,6 +20,16 @@ readelf -h "$fake" | grep -q 'Type:'
 
 base=$(mktemp -d "${TMPDIR:-/tmp}/backend-pair-independent.XXXXXX")
 declare -a launchers=()
+current_case=preflight
+failure() {
+  local status=$? line=${BASH_LINENO[0]:-unknown}
+  echo "BACKEND_PAIR_CASE_FAILED case=$current_case line=$line status=$status" >&2
+  for log in "${case_root:-}/pair.log" "${case_root:-}/loser.log"; do
+    [[ -f $log ]] && { echo "--- $log" >&2; cat "$log" >&2; }
+  done
+  exit "$status"
+}
+trap failure ERR
 cleanup() {
   set +e
   for pid in "${launchers[@]:-}"; do
@@ -38,6 +48,7 @@ trap cleanup EXIT
 case_root= place= deployment= config_root= state_root= runtime= state= pair_pid=
 prepare() {
   local name=$1
+  current_case=$name
   case_root=$base/$name
   runtime=$case_root/run/metaflow/$name
   state=$case_root/state

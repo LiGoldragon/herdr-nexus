@@ -142,7 +142,11 @@ static int serve(const char *session, const char *config, const char *state) {
 int main(int argc, char **argv) {
   if (argc < 4 || strcmp(argv[1], "--session") != 0) return 64;
   const char *config = getenv("XDG_CONFIG_HOME"), *state = getenv("XDG_STATE_HOME");
-  if (!config || !state || mkdirs(config) < 0 || mkdirs(state) < 0 || paths(argv[2], config, state) < 0) return 65;
+  if (!config) return 65;
+  if (!state) return 66;
+  if (mkdirs(config) < 0) return 67;
+  if (mkdirs(state) < 0) return 68;
+  if (paths(argv[2], config, state) < 0) return 69;
   if (strcmp(argv[3], "status") == 0 && (argc == 5 || argc == 6) && strcmp(argv[4], "server") == 0)
     return emit_status(argv[2], state, argc == 6 && strcmp(argv[5], "--json") == 0);
   if (argc >= 5 && strcmp(argv[3], "workspace") == 0 && strcmp(argv[4], "create") == 0) {
