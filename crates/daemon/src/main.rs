@@ -9,8 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let bootstrap =
             Signal::<herdr_nexus_wire::transport_types::CoreBootstrap>::from(Vec::<u8>::from(body))
                 .restore()?;
-        drop(input);
-        nix::unistd::close(0)?;
         bootstrap
     };
     let admission = herdr_nexus_wire::ValidAdmission::try_from(&place.admission)
@@ -19,6 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &place.place,
         admission,
         place.peer_identity,
+        place.publication_channel,
     )?);
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(
         bootstrap.paths(),

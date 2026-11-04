@@ -6,6 +6,7 @@ pub mod meta_call;
 pub mod meta_payload;
 pub mod public_call;
 pub mod public_payload;
+pub mod publication;
 pub mod transport_types;
 
 pub fn socket_names() -> transport_types::SocketNames {

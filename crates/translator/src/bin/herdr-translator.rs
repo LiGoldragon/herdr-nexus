@@ -9,7 +9,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .restore()?;
     drop(stdin);
-    nix::unistd::close(0)?;
     server::run(&bootstrap)?;
     Ok(())
 }

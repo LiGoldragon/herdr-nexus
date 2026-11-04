@@ -46,6 +46,17 @@ impl OwnedListener {
             inode: metadata.ino(),
         })
     }
+
+    fn identity(&self) -> Result<herdr_nexus_wire::transport_types::SocketIdentity, String> {
+        Ok(herdr_nexus_wire::transport_types::SocketIdentity {
+            device_id: herdr_nexus_wire::transport_types::DeviceId(
+                i64::try_from(self.device).map_err(|_| "listener device exceeds Integer")?,
+            ),
+            inode_id: herdr_nexus_wire::transport_types::InodeId(
+                i64::try_from(self.inode).map_err(|_| "listener inode exceeds Integer")?,
+            ),
+        })
+    }
 }
 
 impl Drop for OwnedListener {
@@ -68,6 +79,7 @@ pub struct Bootstrap {
     public_ready: std::sync::Condvar,
     admission: herdr_nexus_wire::ValidAdmission,
     translator_peer: BoundPeer,
+    publication_channel: herdr_nexus_wire::publication::InheritedChannel,
 }
 
 impl Bootstrap {
@@ -75,9 +87,20 @@ impl Bootstrap {
         place: &shared_translator::placement::Place,
         admission: herdr_nexus_wire::ValidAdmission,
         translator_peer: shared_translator::PeerIdentity,
+        publication_channel: herdr_nexus_wire::transport_types::PublicationChannel,
     ) -> std::io::Result<Self> {
         let paths = SocketPaths::from(place);
+        let publication_channel = herdr_nexus_wire::publication::InheritedChannel::validate(
+            &publication_channel,
+            admission.deadline,
+        )
+        .map_err(std::io::Error::other)?;
         let meta = OwnedListener::bind(paths.meta.clone())?;
+        publication_channel.publish(
+            herdr_nexus_wire::transport_types::Listener::MetaNexus,
+            meta.identity().map_err(std::io::Error::other)?,
+        )
+        .map_err(std::io::Error::other)?;
         Ok(Self {
             paths,
             store: Arc::new(ConfigurationStore::default()),
@@ -86,6 +109,7 @@ impl Bootstrap {
             public_ready: std::sync::Condvar::new(),
             admission,
             translator_peer: BoundPeer::capture(translator_peer)?,
+            publication_channel,
         })
     }
 
@@ -99,6 +123,17 @@ impl Bootstrap {
                     socket_path: SocketPath(self.paths.public.display().to_string()),
                     message: Message(error.to_string()),
                 }
+            })?;
+            self.publication_channel.publish(
+                herdr_nexus_wire::transport_types::Listener::PublicNexus,
+                listener.identity().map_err(|message| BootstrapRefusal {
+                    socket_path: SocketPath(self.paths.public.display().to_string()),
+                    message: Message(message),
+                })?,
+            )
+            .map_err(|message| BootstrapRefusal {
+                socket_path: SocketPath(self.paths.public.display().to_string()),
+                message: Message(message),
             })?;
             let mut public = self
                 .public

@@ -50,12 +50,13 @@ failure() {
 }
 trap failure ERR
 cleanup() {
+  trap - ERR
   set +e
   for pid in "${launchers[@]:-}"; do
-    [[ -n $pid ]] && kill "$pid" 2>/dev/null
+    if [[ -n $pid ]]; then kill "$pid" 2>/dev/null || true; fi
   done
   for pid in "${launchers[@]:-}"; do
-    [[ -n $pid ]] && wait "$pid" 2>/dev/null
+    if [[ -n $pid ]]; then wait "$pid" 2>/dev/null || true; fi
   done
   find "$base" -xdev -print >"$base.deletion-list"
   awk -v root="$base" 'index($0, root) != 1 { exit 1 }' "$base.deletion-list" || return

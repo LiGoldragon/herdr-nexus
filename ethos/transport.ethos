@@ -1,6 +1,6 @@
 Library
 [ shared_translator:[ Caller Place PeerIdentity ] ; imports
-  meta_signal_herdr_nexus:[ BudgetValue ]
+  meta_signal_herdr_nexus:[ BudgetValue PathValue ]
   signal_herdr_nexus:[ InstanceId ] ]
 [ Lane.[ PublicText MetaText EmissionSignal ]          ; types
   Kind.[ Request Answered Failed ]
@@ -14,8 +14,23 @@ Library
   FrameDeadlineMilliseconds.Integer
   FrameCapacityBytes.Integer
   RetryDelayMilliseconds.Integer
+  ExpectedHerdrExecutable.PathValue
+  DirectoryDescriptor.Integer
+  DeviceId.Integer
+  InodeId.Integer
+  DirectoryIdentity.{ DeviceId InodeId }
+  InheritedDirectory.{ DirectoryDescriptor DirectoryIdentity }
+  ConfigurationHome.InheritedDirectory
+  BackendStateHome.InheritedDirectory
+  BackendRoots.{ ConfigurationHome BackendStateHome }
+  PublicationDescriptor.Integer
+  PublicationChannel.PublicationDescriptor
+  Listener.[ MetaNexus PublicNexus PublicTranslator MetaTranslator ]
+  SocketIdentity.{ DeviceId InodeId }
+  ListenerPublication.{ Listener SocketIdentity }
+  ListenerPublished.Listener
   Admission.{ FrameDeadlineMilliseconds FrameCapacityBytes RetryDelayMilliseconds }
-  CoreBootstrap.{ Place Admission PeerIdentity InstanceId }
-  TranslatorBootstrap.{ Place Admission BudgetValue PeerIdentity } ]
+  CoreBootstrap.{ Place Admission PeerIdentity InstanceId PublicationChannel }
+  TranslatorBootstrap.{ Place Admission BudgetValue PeerIdentity ExpectedHerdrExecutable BackendRoots PublicationChannel } ]
 []                                                    ; traits
 []                                                    ; associations

@@ -239,6 +239,7 @@ dependencies = [
  "meta-signal-herdr-nexus",
  "nix",
  "rkyv",
+ "rustix",
  "signal",
  "signal-herdr-nexus",
  "translator",
