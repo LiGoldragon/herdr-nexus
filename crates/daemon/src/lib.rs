@@ -260,7 +260,6 @@ pub enum EmissionResult {
 
 struct SocketEmitter {
     translator_socket: std::path::PathBuf,
-    admission: herdr_nexus_wire::ValidAdmission,
 }
 
 struct DispatcherState {
@@ -399,7 +398,6 @@ impl Dispatcher {
     pub fn new(
         paths: &SocketPaths,
         configuration: Arc<ConfigurationStore>,
-        emission_admission: herdr_nexus_wire::ValidAdmission,
     ) -> Self {
         Self {
             state: std::sync::Mutex::new(DispatcherState {
@@ -410,7 +408,6 @@ impl Dispatcher {
             }),
             emitter: Arc::new(SocketEmitter {
                 translator_socket: paths.translator.clone(),
-                admission: emission_admission,
             }),
             subscriptions: std::sync::Mutex::new(SubscriptionHub::default()),
             next_subscription_generation: std::sync::atomic::AtomicU64::new(1),
@@ -432,10 +429,6 @@ impl Dispatcher {
         let mut dispatcher = Self::new(
             paths,
             configuration,
-            herdr_nexus_wire::ValidAdmission {
-                deadline: Duration::from_millis(30),
-                frame_capacity: 4096,
-            },
         );
         dispatcher.emitter = emitter;
         dispatcher
@@ -877,7 +870,7 @@ impl Dispatcher {
 impl ExternalEmitter for SocketEmitter {
     fn emit(
         &self,
-        _configuration: &ReadyCoreConfiguration,
+        configuration: &ReadyCoreConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult {
         use herdr_nexus_wire::transport_types::{Kind, Lane};
@@ -886,7 +879,7 @@ impl ExternalEmitter for SocketEmitter {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
-        let mut stream = match DeadlineStream::new(stream, self.admission.deadline) {
+        let mut stream = match DeadlineStream::new(stream, configuration.transport_timeout) {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
@@ -904,7 +897,7 @@ impl ExternalEmitter for SocketEmitter {
                 kind: Kind::Request,
                 payload: request.bytes().to_vec(),
             },
-            self.admission.frame_capacity,
+            configuration.frame_capacity_bytes,
         ) {
             return unavailable_transport(
                 &self.translator_socket,
@@ -917,7 +910,7 @@ impl ExternalEmitter for SocketEmitter {
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let body = herdr_nexus_wire::frame::read_frame(
                 &mut stream,
-                self.admission.frame_capacity,
+                configuration.frame_capacity_bytes,
             )?;
             if body.lane != Lane::EmissionSignal || body.kind != Kind::Answered {
                 return Err("translator returned a non-answer emission frame".into());
@@ -1390,6 +1383,62 @@ mod tests {
             session: signal_herdr_nexus::Session("missing".into()),
             pane_id: signal_herdr_nexus::PaneId("pane".into()),
         }
+    }
+
+    #[test]
+    fn socket_emitter_uses_ready_sender_timeout_and_capacity() {
+        use emission_herdr_nexus::{Herdr, Verb};
+        use std::os::unix::net::UnixListener;
+
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-emitter-bounds-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let admission = herdr_nexus_wire::ValidAdmission {
+            deadline: Duration::from_secs(1),
+            frame_capacity: signal::MAXIMUM_SIGNAL_BYTES,
+        };
+        let herdr = Herdr {
+            session: signal_herdr_nexus::Session("bounds".into()),
+            verb: Verb::PaneList,
+        };
+
+        let timeout_socket = directory.join("timeout.sock");
+        let timeout_listener = UnixListener::bind(&timeout_socket).expect("timeout listener");
+        let timeout_peer = std::thread::spawn(move || {
+            let (_stream, _) = timeout_listener.accept().expect("timeout connection");
+            std::thread::sleep(Duration::from_millis(100));
+        });
+        let emitter = SocketEmitter {
+            translator_socket: timeout_socket,
+        };
+        let mut configuration = (*test_configuration()).clone();
+        configuration.transport_timeout = Duration::from_millis(10);
+        let began = Instant::now();
+        assert!(matches!(
+            emitter.emit(&configuration, herdr.clone()),
+            EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Uncertain)
+        ));
+        assert!(began.elapsed() < admission.deadline);
+        timeout_peer.join().expect("timeout peer");
+
+        let capacity_socket = directory.join("capacity.sock");
+        let capacity_listener = UnixListener::bind(&capacity_socket).expect("capacity listener");
+        let capacity_peer = std::thread::spawn(move || {
+            let _ = capacity_listener.accept().expect("capacity connection");
+        });
+        let emitter = SocketEmitter {
+            translator_socket: capacity_socket,
+        };
+        configuration.frame_capacity_bytes = 1;
+        assert!(matches!(
+            emitter.emit(&configuration, herdr),
+            EmissionResult::Unavailable(_)
+        ));
+        capacity_peer.join().expect("capacity peer");
+        std::fs::remove_dir_all(directory).expect("fixture cleanup");
     }
 
     #[test]

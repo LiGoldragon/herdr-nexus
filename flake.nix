@@ -121,6 +121,13 @@
             for contract in $contracts; do test -e "$contract"; done
             touch "$out"
           '';
+          paired-relaunch = pkgs.runCommand "herdr-paired-relaunch" {
+            package = self.packages.${system}.default;
+            script = ./checks/paired-relaunch.sh;
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$package"
+            touch "$out"
+          '';
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust.toolchain ];

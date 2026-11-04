@@ -2,7 +2,7 @@
 
 ## Paired front proof — 2026-11-04
 
-Remote Nix built `/nix/store/mmi93lyp7r676rbi4skaf4fk2ikm661c-herdr-nexus-v1`.
+Remote Nix built `/nix/store/lxdbk269775akwn0cbdkdh9lfyrjhfyy-herdr-nexus-v1`.
 `proof/live-herdr.sh` launched two isolated metaflow directories through
 `herdr-pair`. The launcher obtained both child process IDs and supplied each
 child the other child's typed peer identity before closing both bootstrap
@@ -27,6 +27,9 @@ LIVE_HERDR_PROOF_OK
 The remote suite additionally rejects an unpaired same-login emission before
 payload decoding and rejects a direct core connection whose kernel process ID
 is not the paired translator.
+The `paired-relaunch` Nix check terminates one child, witnesses the launcher reap
+the survivor, launches a fresh pair with distinct kernel process identities, and
+forwards a valid Nexus-owned Set through that fresh pair.
 
 The rerunnable proof is `proof/live-herdr.sh`. It owns a unique directory,
 two Herdr sessions, two workspaces, their panes, and only the processes it
