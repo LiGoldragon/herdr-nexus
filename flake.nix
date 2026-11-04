@@ -8,7 +8,7 @@
       url = "github:LiGoldragon/rust-build";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    ethos-zero.url = "github:LiGoldragon/ethos-zero/b8052c2404374265dfcddbde83fef76977f78acd";
+    ethos-zero.url = "github:LiGoldragon/ethos-zero";
   };
 
   outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero }:
