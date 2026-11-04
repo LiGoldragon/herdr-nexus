@@ -121,14 +121,16 @@ require_backend_ready() {
   wait_backend
   [[ -S $config_root/herdr/sessions/$session/herdr.sock ]]
   [[ -S $config_root/herdr/sessions/$session/herdr-client.sock ]]
-  local status fake_status
+  local status fake_status status_file=$case_root/fake-status.out error_file=$case_root/fake-status.err
   set +e
-  status=$(XDG_CONFIG_HOME=$config_root XDG_STATE_HOME=$state_root \
-    "$fake" --session "$session" status server --json)
+  XDG_CONFIG_HOME=$config_root XDG_STATE_HOME=$state_root \
+    "$fake" --session "$session" status server --json >"$status_file" 2>"$error_file"
   fake_status=$?
   set -e
+  status=$(cat "$status_file")
   if (( fake_status != 0 )); then
     echo "FAKE_STATUS_FAILED status=$fake_status XDG_CONFIG_HOME=$config_root XDG_STATE_HOME=$state_root session=$session" >&2
+    cat "$error_file" >&2
     if [[ -f $state_root/fixture.path-failure ]]; then
       cat "$state_root/fixture.path-failure" >&2
     fi

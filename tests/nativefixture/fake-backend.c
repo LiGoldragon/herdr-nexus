@@ -58,6 +58,13 @@ static void record_path_failure(const char *session, const char *config,
           config, state, session, api, api_length, client, client_length,
           sizeof(((struct sockaddr_un *)0)->sun_path), failure_errno);
   fclose(output);
+  fprintf(stderr,
+          "FAKE_PATH_FAILURE XDG_CONFIG_HOME=%s XDG_STATE_HOME=%s session=%s "
+          "api_socket=%s api_socket_length=%d client_socket=%s "
+          "client_socket_length=%d sun_path_capacity=%zu "
+          "canonicalizes_fd_paths=false errno=%d\n",
+          config, state, session, api, api_length, client, client_length,
+          sizeof(((struct sockaddr_un *)0)->sun_path), failure_errno);
 }
 
 static int paths(const char *session, const char *config, const char *state) {
