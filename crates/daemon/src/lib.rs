@@ -6,6 +6,51 @@ use meta_signal_herdr_nexus::{
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
+/// Applies one absolute deadline across all reads and writes performed by a
+/// framed attempt. Recomputing the socket timeout before every syscall keeps a
+/// peer that drip-feeds a partial frame from extending the attempt forever.
+pub struct DeadlineStream {
+    stream: std::os::unix::net::UnixStream,
+    deadline: Instant,
+}
+
+impl DeadlineStream {
+    pub fn new(stream: std::os::unix::net::UnixStream, timeout: Duration) -> std::io::Result<Self> {
+        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "deadline overflow")
+        })?;
+        Ok(Self { stream, deadline })
+    }
+
+    fn remaining(&self) -> std::io::Result<Duration> {
+        self.deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "attempt deadline elapsed")
+            })
+    }
+}
+
+impl std::io::Read for DeadlineStream {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.stream.set_read_timeout(Some(self.remaining()?))?;
+        std::io::Read::read(&mut self.stream, buffer)
+    }
+}
+
+impl std::io::Write for DeadlineStream {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::write(&mut self.stream, buffer)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stream.set_write_timeout(Some(self.remaining()?))?;
+        std::io::Write::flush(&mut self.stream)
+    }
+}
+
 pub const PUBLIC_SOCKET_NAME: &str = "herdr.sock";
 pub const META_SOCKET_NAME: &str = "herdr-meta.sock";
 pub const TRANSLATOR_SOCKET_NAME: &str = "herdr-translator.sock";
@@ -285,6 +330,57 @@ impl Dispatcher {
         }
     }
 
+    /// A subscription is an acknowledged, nondurable stream. A complete List
+    /// establishes and advances its state; uncertain/refused polls leave the
+    /// previous state intact. Delivery is direct and serialized on this stream,
+    /// so a failed or slow subscriber is removed simply by ending the call.
+    pub fn subscribe(
+        &self,
+        stream: std::os::unix::net::UnixStream,
+        session: signal_herdr_nexus::Session,
+        configuration: Arc<RuntimeConfiguration>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use signal::{FrameWriting, Signalizable};
+        use signal_herdr_nexus::{Changed_Data, Outcome, Query, Response};
+        let capacity = signal::FrameCapacity::from(configuration.frame_capacity_bytes);
+        let acknowledgement = {
+            let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
+            Response::Subscribed(core.subscribe(
+                session.clone(),
+                herdr_nexus_core::ExternalResult::Succeeded(()),
+            ))
+        };
+        let mut output = DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+        output.write_frame(&acknowledgement.signalize()?, capacity)?;
+
+        let mut previous = std::collections::HashMap::new();
+        loop {
+            std::thread::sleep(configuration.polling);
+            let response = self.dispatch(Query::List(session.clone()), Arc::clone(&configuration));
+            let Response::Listed(Outcome::Listed(known)) = response else {
+                continue;
+            };
+            let current: std::collections::HashMap<_, _> = known
+                .into_iter()
+                .map(|known| (known.pane, known.state))
+                .collect();
+            if !previous.is_empty() {
+                for (pane, state) in &current {
+                    if previous.get(pane) != Some(state) {
+                        let changed = Response::Changed(Changed_Data {
+                            pane: pane.clone(),
+                            state: state.clone(),
+                        });
+                        output =
+                            DeadlineStream::new(stream.try_clone()?, configuration.call_timeout)?;
+                        output.write_frame(&changed.signalize()?, capacity)?;
+                    }
+                }
+            }
+            previous = current;
+        }
+    }
+
     fn execute(
         &self,
         configuration: &RuntimeConfiguration,
@@ -292,13 +388,12 @@ impl Dispatcher {
     ) -> emission_herdr_nexus::ExternalOutcome {
         use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let mut stream = std::os::unix::net::UnixStream::connect(&self.translator_socket)?;
+            let stream = std::os::unix::net::UnixStream::connect(&self.translator_socket)?;
             let timeout = match &herdr.verb {
                 emission_herdr_nexus::Verb::AgentStart(_) => configuration.start_timeout,
                 _ => configuration.call_timeout,
             };
-            stream.set_read_timeout(Some(timeout))?;
-            stream.set_write_timeout(Some(timeout))?;
+            let mut stream = DeadlineStream::new(stream, timeout)?;
             let request =
                 emission_herdr_nexus::Query::Execute(emission_herdr_nexus::Execute_Data {
                     configuration: configuration.source.clone(),
@@ -532,6 +627,156 @@ mod tests {
             frame_capacity_bytes: FrameCapacityBytes(signal::MAXIMUM_SIGNAL_BYTES as i64),
             external_output_limit_bytes: ExternalOutputLimitBytes(1024 * 1024),
         }
+    }
+
+    #[test]
+    fn absolute_deadline_stops_a_drip_fed_partial_read() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let sender = std::thread::spawn(move || {
+            for byte in [1_u8, 2, 3, 4] {
+                if writer.write_all(&[byte]).is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        });
+        let mut reader =
+            DeadlineStream::new(reader, Duration::from_millis(50)).expect("representable deadline");
+        let mut bytes = [0_u8; 4];
+        let error = reader
+            .read_exact(&mut bytes)
+            .expect_err("drip must not extend the absolute deadline");
+        assert!(matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ));
+        sender.join().expect("sender");
+    }
+
+    #[test]
+    fn subscription_acknowledges_then_emits_only_complete_snapshot_changes() {
+        use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
+        use signal_herdr_nexus::{
+            Changed_Data, Label, Outcome, Pane, PaneId, Response, Root, Session, State, Workspace,
+        };
+        let (place, directory) = test_place("subscription");
+        let paths = SocketPaths::from(&place);
+        let dispatcher = Arc::new(Dispatcher::new(&paths));
+        let pane = Pane {
+            session: Session("subscription".into()),
+            pane_id: PaneId("w1:p1".into()),
+        };
+        let other = Pane {
+            session: Session("other".into()),
+            pane_id: PaneId("w2:p1".into()),
+        };
+        {
+            let mut core = dispatcher.core.lock().expect("core");
+            for owned in [&pane, &other] {
+                let workspace = Workspace {
+                    session: owned.session.clone(),
+                    root: Root(directory.display().to_string()),
+                    variable_vector: vec![],
+                };
+                assert!(matches!(
+                    core.create(
+                        workspace,
+                        herdr_nexus_core::ExternalResult::Succeeded(owned.clone())
+                    ),
+                    Outcome::Created(_)
+                ));
+                assert_eq!(
+                    core.start(
+                        owned.clone(),
+                        Label(format!("label-{}", owned.session.0)),
+                        herdr_nexus_core::ExternalResult::Succeeded(())
+                    ),
+                    Outcome::Done
+                );
+            }
+        }
+        let listener = std::os::unix::net::UnixListener::bind(&paths.translator)
+            .expect("bind translator fixture");
+        let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
+        let target = pane.clone();
+        let unrelated = other.clone();
+        let fixture = std::thread::spawn(move || {
+            let outcomes = [
+                ExternalOutcome::Listed(vec![
+                    PaneObservation {
+                        pane: target.clone(),
+                        state: State::Idle,
+                    },
+                    PaneObservation {
+                        pane: unrelated.clone(),
+                        state: State::Busy,
+                    },
+                ]),
+                ExternalOutcome::Uncertain,
+                ExternalOutcome::Listed(vec![
+                    PaneObservation {
+                        pane: target.clone(),
+                        state: State::Busy,
+                    },
+                    PaneObservation {
+                        pane: unrelated.clone(),
+                        state: State::Idle,
+                    },
+                ]),
+                ExternalOutcome::Listed(vec![PaneObservation {
+                    pane: target,
+                    state: State::Idle,
+                }]),
+            ];
+            for outcome in outcomes {
+                let (mut stream, _) = listener.accept().expect("accept list attempt");
+                let _ = stream.read_frame(capacity).expect("read list attempt");
+                stream
+                    .write_frame(
+                        &emission_herdr_nexus::Response::Executed(outcome)
+                            .signalize()
+                            .expect("archive outcome"),
+                        capacity,
+                    )
+                    .expect("write list outcome");
+            }
+        });
+        let configuration = Arc::new(validate(configuration(10)).expect("valid configuration"));
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("subscriber pair");
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("client timeout");
+        let subscribed = Arc::clone(&dispatcher);
+        let subscription = std::thread::spawn(move || {
+            subscribed
+                .subscribe(server, Session("subscription".into()), configuration)
+                .is_err()
+        });
+        let read_response = |stream: &mut std::os::unix::net::UnixStream| {
+            let body = stream
+                .read_frame(capacity)
+                .expect("read subscription frame");
+            Signal::<Response>::from(Vec::<u8>::from(body))
+                .restore()
+                .expect("restore subscription frame")
+        };
+        assert_eq!(
+            read_response(&mut client),
+            Response::Subscribed(Outcome::Done)
+        );
+        assert_eq!(
+            read_response(&mut client),
+            Response::Changed(Changed_Data {
+                pane: pane.clone(),
+                state: State::Busy,
+            })
+        );
+        drop(client);
+        assert!(subscription.join().expect("subscription thread"));
+        fixture.join().expect("translator fixture");
+        drop(dispatcher);
+        std::fs::remove_file(&paths.translator).expect("remove fixture socket");
+        std::fs::remove_dir(directory).expect("remove fixture directory");
     }
 
     fn configure(store: &ConfigurationStore, candidate: Configuration) -> ConfigureOutcome {

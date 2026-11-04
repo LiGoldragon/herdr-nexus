@@ -8,14 +8,14 @@ translator owns Datom, JSON, and process execution.
 `ethos/emission.ethos` is the documented temporary Signal-root stand-in for
 Emission. Ethos-zero is unchanged.
 
-The current `InMemory` backend is explicitly nondurable. The daemon entry is a
-scaffold until typed socket serving and configuration lifecycle are connected.
+The current `InMemory` backend is explicitly nondurable and provides no
+restart recovery. Subscriptions acknowledge before delivering changes, carry
+no durable event history, and write each change directly with the configured
+deadline. A disconnected reader obtains current state with `List` before
+subscribing again.
 
-Run the proved core and contract tests inside the repository's Nix toolchain:
+Build the full check through Nix:
 
 ```sh
-nix develop /git/github.com/LiGoldragon/datom-codec --command \
-  cargo test --manifest-path crates/core/Cargo.toml
-nix develop /git/github.com/LiGoldragon/datom-codec --command \
-  cargo test --manifest-path crates/emission/Cargo.toml --features datom
+nix build .#checks.x86_64-linux.test --option max-jobs 0 -L
 ```

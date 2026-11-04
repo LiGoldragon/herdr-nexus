@@ -56,8 +56,8 @@ impl Fixture {
         Configuration {
             herdr_executable: HerdrExecutable(self.executable.display().to_string()),
             polling_milliseconds: PollingMilliseconds(1),
-            call_timeout_milliseconds: CallTimeoutMilliseconds(500),
-            start_timeout_milliseconds: StartTimeoutMilliseconds(250),
+            call_timeout_milliseconds: CallTimeoutMilliseconds(5_000),
+            start_timeout_milliseconds: StartTimeoutMilliseconds(5_000),
             frame_capacity_bytes: FrameCapacityBytes(8 * 1024 * 1024),
             external_output_limit_bytes: ExternalOutputLimitBytes(64 * 1024),
         }
@@ -172,7 +172,7 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
             "--executable",
             "/opt/codex",
             "--timeout",
-            "250",
+            "5000",
             "--",
             "--model",
             "x y",

@@ -71,6 +71,37 @@ impl Client {
         }
     }
 
+    /// Receives the acknowledgement and subsequent change events on one
+    /// dedicated subscription connection. Events are nondurable; reconnecting
+    /// callers obtain current state with List before subscribing again.
+    pub fn subscribe(
+        &self,
+        session: signal_herdr_nexus::Session,
+        mut receive: impl FnMut(signal_herdr_nexus::Response) -> Result<(), ClientError>,
+    ) -> Result<(), ClientError> {
+        use shared_translator::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(&self.socket).map_err(ClientError::Io)?;
+        let query = signal_herdr_nexus::Query::Subscribe(session);
+        stream
+            .write_frame(
+                &query
+                    .signalize()
+                    .map_err(|error| ClientError::Signal(format!("{error:?}")))?,
+                self.capacity,
+            )
+            .map_err(ClientError::Frame)?;
+        loop {
+            let body = stream
+                .read_frame(self.capacity)
+                .map_err(ClientError::Frame)?;
+            let response = Signal::<signal_herdr_nexus::Response>::from(Vec::<u8>::from(body))
+                .restore()
+                .map_err(|error| ClientError::Signal(format!("{error:?}")))?;
+            receive(response)?;
+        }
+    }
+
     #[cfg(feature = "text")]
     pub fn request_text(
         &self,
