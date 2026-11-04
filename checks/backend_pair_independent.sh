@@ -18,9 +18,10 @@ for executable in "$launcher" "$core" "$translator" "$public" "$meta" "$fake"; d
 done
 readelf -h "$fake" | grep -q 'Type:'
 
-base=$(mktemp -d "${TMPDIR:-/tmp}/backend-pair-independent.XXXXXX")
+base=$(mktemp -d "${TMPDIR:-/tmp}/b.XXXXXX")
 declare -a launchers=()
 current_case=preflight
+case_index=0
 failure() {
   local status=$? line=${BASH_LINENO[0]:-unknown}
   trap - ERR
@@ -65,16 +66,17 @@ trap cleanup EXIT
 
 case_root= place= deployment= config_root= state_root= runtime= state= pair_pid=
 prepare() {
-  local name=$1
-  current_case=$name
-  case_root=$base/$name
+  current_case=$1
+  case_index=$((case_index + 1))
+  local name=m$case_index
+  case_root=$base/$case_index
   runtime=$case_root/run/metaflow/$name
   state=$case_root/state
-  config_root=$state/backend-config
-  state_root=$state/backend-state
+  config_root=$state/c
+  state_root=$state/s
   mkdir -p "$runtime" "$state" "$case_root/home"
   place="{ $name $runtime $state }"
-  deployment="{ $fake [ backend-config ] [ backend-state ] backend.owner 3000 200 400 20 1048576 }"
+  deployment="{ $fake [ c ] [ s ] o 3000 200 400 20 1048576 }"
 }
 
 launch() {
@@ -136,7 +138,8 @@ wait_nexus() {
 }
 
 configure_ready() {
-  local name=$1 output=
+  local name output=
+  name=$(session_name)
   wait_nexus
   XDG_RUNTIME_DIR=$case_root/run "$meta" "$name" "Configure.HerdrPath.$fake" >/dev/null
   XDG_RUNTIME_DIR=$case_root/run "$meta" "$name" 'Configure.CallTimeout.200' >/dev/null
@@ -192,8 +195,9 @@ configure_ready positive
 assert_environment_file "$state_root/fixture.backend-environment"
 workspace=$case_root/workspace
 mkdir -p "$workspace"
-XDG_RUNTIME_DIR=$case_root/run "$package/bin/herdr-nexus" positive \
-  "Create.{ positive $workspace [] }" | grep -q 'Created.Created'
+positive_name=$(session_name)
+XDG_RUNTIME_DIR=$case_root/run "$package/bin/herdr-nexus" "$positive_name" \
+  "Create.{ $positive_name $workspace [] }" | grep -q 'Created.Created'
 assert_environment_file "$state_root/fixture.client-environment"
 read -r -a positive_children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
 [[ ${#positive_children[@]} -eq 3 ]]
@@ -201,8 +205,8 @@ stop_pair
 assert_no_children "${positive_children[@]}"
 [[ -f $state/unrelated-state ]]
 [[ -f $config_root/herdr/sessions/unrelated/keep ]]
-[[ ! -e $config_root/herdr/sessions/positive/herdr.sock ]]
-[[ ! -e $config_root/herdr/sessions/positive/herdr-client.sock ]]
+[[ ! -e $config_root/herdr/sessions/$positive_name/herdr.sock ]]
+[[ ! -e $config_root/herdr/sessions/$positive_name/herdr-client.sock ]]
 
 # Concurrent claimant loses without disturbing the proven owner.
 prepare concurrent
@@ -219,40 +223,41 @@ pair_pid=$winner; stop_pair
 
 # Pre-existing claim and backend sockets are conflicts; neither is adopted.
 prepare stale-claim
-touch "$runtime/backend.owner"
+touch "$runtime/o"
 launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-[[ -f $runtime/backend.owner ]]
+[[ -f $runtime/o ]]
 
 prepare stale-socket
-mkdir -p "$config_root/herdr/sessions/stale-socket"
-touch "$config_root/herdr/sessions/stale-socket/herdr.sock"
+stale_name=$(session_name)
+mkdir -p "$config_root/herdr/sessions/$stale_name"
+touch "$config_root/herdr/sessions/$stale_name/herdr.sock"
 launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-[[ -f $config_root/herdr/sessions/stale-socket/herdr.sock ]]
+[[ -f $config_root/herdr/sessions/$stale_name/herdr.sock ]]
 
 # Descriptor-confined roots reject a symlink component when it is used.
 prepare symlink-root
 mkdir -p "$case_root/outside"
-ln -s "$case_root/outside" "$state/backend-config"
+ln -s "$case_root/outside" "$state/c"
 launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
 [[ -z $(find "$case_root/outside" -mindepth 1 -print -quit) ]]
 
 # Invalid configuration is rejected before a backend effect.
 for invalid in \
-  "{ $fake [] [ backend-state ] backend.owner 3000 200 400 20 1048576 }" \
-  "{ $fake [ backend-config ] [] backend.owner 3000 200 400 20 1048576 }" \
-  "{ $fake [ .. ] [ backend-state ] backend.owner 3000 200 400 20 1048576 }" \
-  "{ $fake [ backend/config ] [ backend-state ] backend.owner 3000 200 400 20 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] ../claim 3000 200 400 20 1048576 }" \
-  "{ relative-backend [ backend-config ] [ backend-state ] backend.owner 3000 200 400 20 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] backend.owner 0 200 400 20 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] backend.owner 3000 0 400 20 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] backend.owner 3000 200 0 20 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] backend.owner 3000 200 400 0 1048576 }" \
-  "{ $fake [ backend-config ] [ backend-state ] backend.owner 3000 200 400 20 0 }"; do
+  "{ $fake [] [ s ] o 3000 200 400 20 1048576 }" \
+  "{ $fake [ c ] [] o 3000 200 400 20 1048576 }" \
+  "{ $fake [ .. ] [ s ] o 3000 200 400 20 1048576 }" \
+  "{ $fake [ backend/config ] [ s ] o 3000 200 400 20 1048576 }" \
+  "{ $fake [ c ] [ s ] ../claim 3000 200 400 20 1048576 }" \
+  "{ relative-backend [ c ] [ s ] o 3000 200 400 20 1048576 }" \
+  "{ $fake [ c ] [ s ] o 0 200 400 20 1048576 }" \
+  "{ $fake [ c ] [ s ] o 3000 0 400 20 1048576 }" \
+  "{ $fake [ c ] [ s ] o 3000 200 0 20 1048576 }" \
+  "{ $fake [ c ] [ s ] o 3000 200 400 0 1048576 }" \
+  "{ $fake [ c ] [ s ] o 3000 200 400 20 0 }"; do
   prepare invalid-$RANDOM
   deployment=$invalid
   launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-  [[ ! -f $state/backend-state/fixture.backend-environment ]]
+  [[ ! -f $state/s/fixture.backend-environment ]]
 done
 
 # Backend startup failure is bounded and creates no pair sockets.
@@ -272,7 +277,7 @@ done
 # A mismatched configured Herdr executable is a typed refusal, not adoption.
 prepare mismatch
 launch; require_backend_ready; wait_nexus
-mismatch_reply=$(XDG_RUNTIME_DIR=$case_root/run "$meta" mismatch 'Configure.HerdrPath./bin/false')
+mismatch_reply=$(XDG_RUNTIME_DIR=$case_root/run "$meta" "$(session_name)" 'Configure.HerdrPath./bin/false')
 [[ $mismatch_reply == *ConfigureRefused* ]]
 kill -0 "$pair_pid"
 stop_pair
@@ -283,6 +288,7 @@ for role in backend core translator; do
   launch; require_backend_ready; configure_ready loss-$role
   read -r -a children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
   [[ ${#children[@]} -eq 3 ]]
+  for child in "${children[@]}"; do kill -0 "$child"; done
   target=
   for child in "${children[@]}"; do
     executable=$(readlink "/proc/$child/exe")
@@ -296,21 +302,22 @@ for role in backend core translator; do
   kill "$target"
   wait_exit "$pair_pid"; ! wait "$pair_pid"
   for child in "${children[@]}"; do wait_exit "$child"; done
+  [[ ! -S $runtime/herdr.sock && ! -S $runtime/herdr-translator.sock ]]
 done
 
 # The graceful path and bounded escalation both reap the exact owned backend.
 prepare graceful
 launch; require_backend_ready
-backend_pid=$(cat "$state_root/fixture.graceful.pid")
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
 stop_pair
 wait_exit "$backend_pid"
 
 prepare escalation
 mkdir -p "$state_root"; touch "$state_root/ignore-term"
 launch; require_backend_ready
-backend_pid=$(cat "$state_root/fixture.escalation.pid")
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
 stop_pair
 wait_exit "$backend_pid"
-[[ ! -e $runtime/backend.owner ]]
+[[ ! -e $runtime/o ]]
 
 echo BACKEND_PAIR_INDEPENDENT_OK
