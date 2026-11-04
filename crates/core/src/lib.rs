@@ -100,8 +100,12 @@ impl Memory for InMemory {
     fn store_attempt(&mut self, pane: &Pane, attempt: Attempt) -> Answer {
         if let Some(owned) = self.panes.get_mut(pane) {
             owned.attempt = attempt;
+            Answer::Succeeded
+        } else {
+            Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
+                "attempt target is not owned".into(),
+            )))
         }
-        Answer::Succeeded
     }
 
     fn reconcile_listing(
@@ -474,6 +478,15 @@ mod tests {
             core.prompt(pane(), Text("hello".into()), ExternalResult::Succeeded(())),
             Outcome::Unknown(pane())
         );
+    }
+
+    #[test]
+    fn memory_refuses_to_claim_an_attempt_change_for_an_absent_pane() {
+        let mut memory = InMemory::default();
+        assert!(matches!(
+            memory.store_attempt(&pane(), Attempt::Uncertain),
+            Answer::Failed(_)
+        ));
     }
 
     #[test]

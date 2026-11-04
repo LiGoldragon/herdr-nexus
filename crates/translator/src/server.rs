@@ -503,6 +503,9 @@ fn core_setting(setting: meta_signal_herdr_nexus::Set) -> core_meta_herdr_nexus:
         meta_signal_herdr_nexus::Set::TransportTimeout(value) => {
             core_meta_herdr_nexus::CoreSet::TransportTimeout(value)
         }
+        meta_signal_herdr_nexus::Set::SubscriberCapacity(value) => {
+            core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value)
+        }
         _ => unreachable!("translator settings are handled before core conversion"),
     }
 }

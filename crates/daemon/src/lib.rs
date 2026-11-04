@@ -276,8 +276,78 @@ struct SessionSubscription {
 }
 
 struct Subscriber {
-    stream: std::os::unix::net::UnixStream,
+    queue: Arc<SubscriberQueue>,
     delivered: std::collections::HashMap<signal_herdr_nexus::Pane, signal_herdr_nexus::State>,
+}
+
+struct SubscriberQueue {
+    state: std::sync::Mutex<SubscriberQueueState>,
+    ready: std::sync::Condvar,
+}
+
+struct SubscriberQueueState {
+    pending: std::collections::VecDeque<signal_herdr_nexus::Response>,
+    capacity: usize,
+    closed: bool,
+}
+
+impl SubscriberQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            state: std::sync::Mutex::new(SubscriberQueueState {
+                pending: std::collections::VecDeque::new(),
+                capacity,
+                closed: false,
+            }),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn enqueue(&self, response: signal_herdr_nexus::Response) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.closed || state.pending.len() >= state.capacity {
+            state.closed = true;
+            state.pending.clear();
+            self.ready.notify_all();
+            return false;
+        }
+        state.pending.push_back(response);
+        self.ready.notify_one();
+        true
+    }
+
+    fn next(&self) -> Option<signal_herdr_nexus::Response> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        while state.pending.is_empty() && !state.closed {
+            state = self.ready.wait(state).unwrap_or_else(|p| p.into_inner());
+        }
+        if state.closed {
+            None
+        } else {
+            state.pending.pop_front()
+        }
+    }
+
+    fn set_capacity(&self, capacity: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.capacity = capacity;
+        if state.pending.len() > capacity {
+            state.closed = true;
+            state.pending.clear();
+            self.ready.notify_all();
+        }
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.closed = true;
+        state.pending.clear();
+        self.ready.notify_all();
+    }
+
+    fn is_open(&self) -> bool {
+        !self.state.lock().unwrap_or_else(|p| p.into_inner()).closed
+    }
 }
 
 fn operation(
@@ -451,6 +521,13 @@ impl Dispatcher {
                     },
                 );
                 let mut state = self.finish_reservation(&pane, reservation);
+                let externally_closed = matches!(
+                    &external,
+                    EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Done)
+                );
+                if externally_closed {
+                    self.publish_closed(&pane);
+                }
                 let outcome = state.core.close(pane.clone(), done_result(external));
                 if outcome == signal_herdr_nexus::Outcome::Done {
                     state.revisions.remove(&pane);
@@ -550,24 +627,40 @@ impl Dispatcher {
                 .collect::<std::collections::HashMap<_, _>>();
             (acknowledgement, current)
         };
+        let queue = Arc::new(SubscriberQueue::new(configuration.subscriber_capacity));
+        if !queue.enqueue(acknowledgement) {
+            return Err("subscriber queue refused its acknowledgement".into());
+        }
+        for (pane, state) in &current {
+            if !queue.enqueue(Response::Changed(Changed_Data {
+                    pane: pane.clone(),
+                    state: state.clone(),
+                })) {
+                return Err("subscriber queue cannot hold its initial snapshot".into());
+            }
+        }
+        self.configuration.register_subscriber(&queue);
+        let writer_queue = Arc::clone(&queue);
+        let writer_configuration = Arc::clone(&self.configuration);
+        std::thread::spawn(move || {
+            while let Some(response) = writer_queue.next() {
+                let Some(configuration) = writer_configuration.snapshot() else {
+                    writer_queue.close();
+                    return;
+                };
+                if write_subscription_change(&stream, &configuration, &response).is_err() {
+                    writer_queue.close();
+                    return;
+                }
+            }
+        });
         let mut hub = self
             .subscriptions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        write_subscription_change(&stream, &configuration, &acknowledgement)?;
-        for (pane, state) in &current {
-            write_subscription_change(
-                &stream,
-                &configuration,
-                &Response::Changed(Changed_Data {
-                    pane: pane.clone(),
-                    state: state.clone(),
-                }),
-            )?;
-        }
         if let Some(existing) = hub.sessions.get_mut(&session) {
             existing.subscribers.push(Subscriber {
-                stream,
+                queue,
                 delivered: current,
             });
             return Ok(());
@@ -580,7 +673,7 @@ impl Dispatcher {
             SessionSubscription {
                 generation,
                 subscribers: vec![Subscriber {
-                    stream,
+                    queue,
                     delivered: current,
                 }],
             },
@@ -621,9 +714,7 @@ impl Dispatcher {
                 if subscription.generation != generation {
                     return;
                 }
-                subscription
-                    .subscribers
-                    .retain(|subscriber| subscriber_connected(&subscriber.stream));
+                subscription.subscribers.retain(|subscriber| subscriber.queue.is_open());
                 if subscription.subscribers.is_empty() {
                     hub.sessions.remove(&session);
                     return;
@@ -661,9 +752,9 @@ impl Dispatcher {
                             })
                         })
                         .collect::<Vec<_>>();
-                    let delivered = changes.iter().all(|change| {
-                        write_subscription_change(&subscriber.stream, &configuration, change).is_ok()
-                    });
+                    let delivered = changes
+                        .into_iter()
+                        .all(|change| subscriber.queue.enqueue(change));
                     if delivered {
                         subscriber.delivered = current.clone();
                     }
@@ -692,6 +783,30 @@ impl Dispatcher {
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult {
         self.emitter.emit(configuration, herdr)
+    }
+
+    fn publish_closed(&self, pane: &signal_herdr_nexus::Pane) {
+        use signal_herdr_nexus::{Changed_Data, Response, State};
+        let mut hub = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(subscription) = hub.sessions.get_mut(&pane.session) else {
+            return;
+        };
+        subscription.subscribers.retain_mut(|subscriber| {
+            if subscriber.delivered.get(pane) == Some(&State::Dead) {
+                return subscriber.queue.is_open();
+            }
+            let delivered = subscriber.queue.enqueue(Response::Changed(Changed_Data {
+                pane: pane.clone(),
+                state: State::Dead,
+            }));
+            if delivered {
+                subscriber.delivered.insert(pane.clone(), State::Dead);
+            }
+            delivered
+        });
     }
 }
 
@@ -801,26 +916,6 @@ fn unavailable_transport(path: &std::path::Path, message: String) -> EmissionRes
     })
 }
 
-fn subscriber_connected(stream: &std::os::unix::net::UnixStream) -> bool {
-    use std::io::Read;
-    let Ok(mut probe) = stream.try_clone() else {
-        return false;
-    };
-    if probe.set_nonblocking(true).is_err() {
-        return false;
-    }
-    let mut byte = [0_u8; 1];
-    match probe.read(&mut byte) {
-        Ok(0) => false,
-        // A subscription is server-to-client after its one query. Any further
-        // client byte is a protocol violation, so consuming it and removing
-        // the subscriber is the wanted behavior.
-        Ok(_) => false,
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
-        Err(_) => false,
-    }
-}
-
 fn write_subscription_change(
     stream: &std::os::unix::net::UnixStream,
     configuration: &RuntimeConfiguration,
@@ -926,6 +1021,7 @@ struct PartialConfiguration {
 pub struct ConfigurationStore {
     partial: RwLock<PartialConfiguration>,
     current: RwLock<Option<Arc<RuntimeConfiguration>>>,
+    subscriber_queues: std::sync::Mutex<Vec<std::sync::Weak<SubscriberQueue>>>,
 }
 
 impl ConfigurationStore {
@@ -1034,6 +1130,7 @@ impl ConfigurationStore {
         }
         *self.partial.write().unwrap_or_else(|p| p.into_inner()) = candidate;
         if let Some(validated) = validated {
+            self.apply_subscriber_capacity(validated.subscriber_capacity);
             *self.current.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(validated));
         }
         Response::Configured(core_meta_herdr_nexus::Configured_Data {
@@ -1047,6 +1144,28 @@ impl ConfigurationStore {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone()
+    }
+
+    fn register_subscriber(&self, queue: &Arc<SubscriberQueue>) {
+        self.subscriber_queues
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(Arc::downgrade(queue));
+    }
+
+    fn apply_subscriber_capacity(&self, capacity: usize) {
+        let mut queues = self
+            .subscriber_queues
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        queues.retain(|queue| {
+            if let Some(queue) = queue.upgrade() {
+                queue.set_capacity(capacity);
+                true
+            } else {
+                false
+            }
+        });
     }
 }
 
@@ -1552,5 +1671,63 @@ mod tests {
             assert!(Instant::now() < deadline, "subscription did not adopt replaced configuration");
             std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    #[test]
+    fn successful_close_delivers_one_dead_only_to_current_subscribers() {
+        use signal::FrameReading;
+        use signal_herdr_nexus::{Outcome, Query, Response, State};
+        let (dispatcher, _emitter, pane) = started_dispatcher(Vec::new());
+        let configuration = test_configuration();
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        client.set_read_timeout(Some(Duration::from_millis(150))).expect("timeout");
+        dispatcher.subscribe(server, pane.session.clone(), Arc::clone(&configuration)).expect("subscribe");
+        let _ = read_subscription(&mut client);
+        let _ = read_subscription(&mut client);
+        assert!(matches!(
+            dispatcher.dispatch(Query::Close(pane.clone()), Arc::clone(&configuration)),
+            Response::Closed(Outcome::Done)
+        ));
+        assert!(matches!(
+            read_subscription(&mut client),
+            herdr_nexus_wire::public_call::Response::Answered(ref output)
+                if matches!(&output.0, Response::Changed(change) if change.pane == pane && change.state == State::Dead)
+        ));
+        client.set_read_timeout(Some(Duration::from_millis(40))).expect("short timeout");
+        assert!(client.read_frame(signal::FrameCapacity::from(4096)).is_err());
+
+        let (late_server, mut late_client) = std::os::unix::net::UnixStream::pair().expect("late pair");
+        late_client.set_read_timeout(Some(Duration::from_millis(40))).expect("late timeout");
+        dispatcher.subscribe(late_server, pane.session, configuration).expect("late subscribe");
+        let _ = read_subscription(&mut late_client);
+        assert!(late_client.read_frame(signal::FrameCapacity::from(4096)).is_err());
+    }
+
+    #[test]
+    fn bounded_subscriber_queue_disconnects_only_the_overflowing_peer() {
+        use signal_herdr_nexus::{Outcome, Response};
+        let slow = SubscriberQueue::new(1);
+        let healthy = SubscriberQueue::new(2);
+        assert!(slow.enqueue(Response::Subscribed(Outcome::Done)));
+        assert!(!slow.enqueue(Response::Subscribed(Outcome::Done)));
+        assert!(!slow.is_open());
+        assert!(healthy.enqueue(Response::Subscribed(Outcome::Done)));
+        assert!(healthy.is_open());
+    }
+
+    #[test]
+    fn lowering_subscriber_capacity_disconnects_only_queues_above_the_new_bound() {
+        use signal_herdr_nexus::{Outcome, Response};
+        let store = ConfigurationStore::default();
+        let over = Arc::new(SubscriberQueue::new(3));
+        let within = Arc::new(SubscriberQueue::new(3));
+        store.register_subscriber(&over);
+        store.register_subscriber(&within);
+        assert!(over.enqueue(Response::Subscribed(Outcome::Done)));
+        assert!(over.enqueue(Response::Subscribed(Outcome::Done)));
+        assert!(within.enqueue(Response::Subscribed(Outcome::Done)));
+        store.apply_subscriber_capacity(1);
+        assert!(!over.is_open());
+        assert!(within.is_open());
     }
 }
