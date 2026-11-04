@@ -1,9 +1,10 @@
 Signal
 [ meta_signal_herdr_nexus:[ Timeout ByteLimit Readiness ConfigurationRefusal ] ] ; imports
 [ Configure.CoreSet ]                                  ; inputs: one Nexus-owned field
-[ Configured.Readiness                                 ; outputs: target readiness
+[ Configured.{ CoreSet Readiness }                     ; outputs: applied field and target readiness
   ConfigureRefused.ConfigurationRefusal ]
 [ CoreSet.[ StartTimeout.meta_signal_herdr_nexus:Timeout ; types: internal Nexus settings only
              Polling.meta_signal_herdr_nexus:Timeout
              FrameCapacity.meta_signal_herdr_nexus:ByteLimit
-             TransportTimeout.meta_signal_herdr_nexus:Timeout ] ]
+             TransportTimeout.meta_signal_herdr_nexus:Timeout
+             SubscriberCapacity.Integer ] ]

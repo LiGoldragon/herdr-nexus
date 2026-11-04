@@ -12,6 +12,7 @@ pub enum CoreSet {
     Polling(meta_signal_herdr_nexus::Timeout),
     FrameCapacity(meta_signal_herdr_nexus::ByteLimit),
     TransportTimeout(meta_signal_herdr_nexus::Timeout),
+    SubscriberCapacity(i64),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -22,11 +23,17 @@ pub enum Query {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct Configured_Data {
+    pub core_set: CoreSet,
+    pub readiness: meta_signal_herdr_nexus::Readiness,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Response {
-    Configured(meta_signal_herdr_nexus::Readiness),
+    Configured(Configured_Data),
     ConfigureRefused(meta_signal_herdr_nexus::ConfigurationRefusal),
 }
-
 /// The generated internal meta contract source.
 pub const ETHOS: &str = include_str!("../../../ethos/core-meta.ethos");
 

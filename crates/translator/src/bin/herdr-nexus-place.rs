@@ -1,7 +1,8 @@
 use datom_codec::Budget;
 use herdr_nexus_translator::registry;
 use herdr_nexus_translator::transport_types::{
-    Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds, TranslatorBootstrap,
+    Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds, PeerIdentity,
+    ProcessId, TranslatorBootstrap, UserId,
 };
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use shared_translator::{FrameCapacity, FrameWriting, Signalizable};
@@ -25,6 +26,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry_path = arguments.next().ok_or("REGISTRY_PATH")?;
     let name = arguments.next().ok_or("NAME")?;
     let target = arguments.next().ok_or("TARGET (Core or Translator)")?;
+    let peer_identity = PeerIdentity {
+        user_id: UserId(integer(arguments.next(), "PEER_USER_ID")?),
+        process_id: ProcessId(integer(arguments.next(), "PEER_PROCESS_ID")?),
+    };
     let admission = Admission {
         frame_deadline_milliseconds: FrameDeadlineMilliseconds(integer(arguments.next(), "FRAME_DEADLINE_MILLISECONDS")?),
         frame_capacity_bytes: FrameCapacityBytes(integer(arguments.next(), "FRAME_CAPACITY_BYTES")?),
@@ -37,7 +42,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut output = io::stdout();
     match target.as_str() {
         "Core" => output.write_frame(
-            &CoreBootstrap { place, admission }.signalize()?,
+            &CoreBootstrap { place, admission, peer_identity }.signalize()?,
             FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES),
         )?,
         "Translator" => {
@@ -46,7 +51,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 depth_limit: DepthLimit(integer(arguments.next(), "TEXT_DEPTH_LIMIT")?),
             };
             output.write_frame(
-                &TranslatorBootstrap { place, admission, budget_value }.signalize()?,
+                &TranslatorBootstrap { place, admission, budget_value, peer_identity }.signalize()?,
                 FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES),
             )?;
         }

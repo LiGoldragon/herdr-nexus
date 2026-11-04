@@ -20,6 +20,13 @@ pub struct ProcessId(pub i64);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PeerIdentity {
+    pub user_id: UserId,
+    pub process_id: ProcessId,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Caller {
     pub user_id: UserId,
     pub group_id: GroupId,
@@ -91,6 +98,7 @@ pub struct Admission {
 pub struct CoreBootstrap {
     pub place: Place,
     pub admission: Admission,
+    pub peer_identity: PeerIdentity,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -99,4 +107,5 @@ pub struct TranslatorBootstrap {
     pub place: Place,
     pub admission: Admission,
     pub budget_value: meta_signal_herdr_nexus::BudgetValue,
+    pub peer_identity: PeerIdentity,
 }

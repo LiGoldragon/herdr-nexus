@@ -39,6 +39,8 @@ pub fn run(
     let meta =
         OwnedSocket::bind(Path::new(&place.directory.0).join(names.meta_translator_socket.0))?;
     let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
+    let nexus_peer = bootstrap.peer_identity.clone();
+    let meta_peer = nexus_peer.clone();
     let meta_configuration = std::sync::Arc::clone(&configuration);
     let meta_place = place.clone();
     std::thread::spawn(move || {
@@ -49,6 +51,7 @@ pub fn run(
             Endpoint::Meta,
             admission,
             bootstrap_budget,
+            meta_peer,
         )
     });
     serve_listener(
@@ -58,6 +61,7 @@ pub fn run(
         Endpoint::Public,
         admission,
         bootstrap_budget,
+        nexus_peer,
     );
     Ok(())
 }
@@ -69,19 +73,22 @@ fn serve_listener(
     endpoint: Endpoint,
     admission: herdr_nexus_wire::ValidAdmission,
     bootstrap_budget: (usize, usize),
+    nexus_peer: herdr_nexus_wire::transport_types::PeerIdentity,
 ) {
     for stream in bound.listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
+        let nexus_peer = nexus_peer.clone();
         std::thread::spawn(move || {
-            if let Err(error) = serve_one(
+            if let Err(error) = serve_one_paired(
                 &mut stream,
                 &configuration,
                 &place,
                 endpoint,
                 admission,
                 bootstrap_budget,
+                Some(&nexus_peer),
             ) {
                 eprintln!("herdr translator request failed: {error}");
             }
@@ -96,6 +103,26 @@ pub fn serve_one(
     endpoint: Endpoint,
     admission: herdr_nexus_wire::ValidAdmission,
     bootstrap_budget: (usize, usize),
+) -> Result<(), ServerError> {
+    serve_one_paired(
+        stream,
+        configuration,
+        place,
+        endpoint,
+        admission,
+        bootstrap_budget,
+        None,
+    )
+}
+
+fn serve_one_paired(
+    stream: &mut UnixStream,
+    configuration: &TranslatorConfiguration,
+    place: &Place,
+    endpoint: Endpoint,
+    admission: herdr_nexus_wire::ValidAdmission,
+    bootstrap_budget: (usize, usize),
+    nexus_peer: Option<&herdr_nexus_wire::transport_types::PeerIdentity>,
 ) -> Result<(), ServerError> {
     use crate::transport::{self, Frame};
     use crate::transport_types::{Kind, Lane};
@@ -130,6 +157,18 @@ pub fn serve_one(
             &mut io,
             lane,
             "caller is outside the bound login",
+            admission.frame_capacity,
+        );
+    }
+    if request.lane == Lane::EmissionSignal
+        && !nexus_peer.is_some_and(|expected| {
+            caller.user_id == expected.user_id && caller.process_id == expected.process_id
+        })
+    {
+        return write_failed_frame(
+            &mut io,
+            lane,
+            "caller is not the paired Nexus",
             admission.frame_capacity,
         );
     }
@@ -309,6 +348,7 @@ impl TranslatorConfiguration {
         use meta_signal_herdr_nexus::{
             Configured_Data, Owner, Readiness, Response, Set, SettingName,
         };
+        let applied = setting.clone();
         let mut partial = self
             .partial
             .write()
@@ -377,6 +417,7 @@ impl TranslatorConfiguration {
             awaiting.push(SettingName::TextBudget);
         }
         Response::Configured(Configured_Data {
+            set: applied,
             owner: Owner::Translator,
             readiness: if awaiting.is_empty() {
                 Readiness::Ready
@@ -524,21 +565,14 @@ fn forward_public_stream(
         let timeout = configuration
             .call_timeout()
             .ok_or_else(|| ServerError::Signal("translator is awaiting CallTimeout".into()))?;
-        let mut core_read = herdr_nexus_wire::deadline::DeadlineStream::new(
+        let Some(body) = read_subscription_signal_frame(
             core.try_clone().map_err(ServerError::Io)?,
             timeout,
-        )
-        .map_err(ServerError::Io)?;
-        let body = match core_read.read_frame(FrameCapacity::from(MAXIMUM_SIGNAL_BYTES)) {
-            Ok(body) => body,
-            Err(signal::FrameError::Io(error))
-                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                return Ok(())
-            }
-            Err(error) => return Err(ServerError::Frame(error)),
+            MAXIMUM_SIGNAL_BYTES,
+        )? else {
+            return Ok(());
         };
-        let response = Signal::<herdr_nexus_wire::public_call::Response>::from(Vec::from(body))
+        let response = Signal::<herdr_nexus_wire::public_call::Response>::from(body)
             .restore()
             .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
         let response = match response {
@@ -562,6 +596,42 @@ fn forward_public_stream(
     }
 }
 
+/// A subscription may remain quiet for its whole useful lifetime.  The first
+/// byte therefore has no idle deadline.  Once a frame starts, the remaining
+/// prefix and body share one absolute deadline, so a partial or drip-fed frame
+/// cannot retain the connection indefinitely.
+fn read_subscription_signal_frame(
+    mut stream: UnixStream,
+    progress_timeout: Duration,
+    capacity: usize,
+) -> Result<Option<Vec<u8>>, ServerError> {
+    use std::io::Read;
+
+    stream.set_read_timeout(None).map_err(ServerError::Io)?;
+    let mut prefix = [0_u8; 4];
+    match stream.read(&mut prefix[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("a one-byte buffer yields at most one byte"),
+        Err(error) => return Err(ServerError::Io(error)),
+    }
+    let mut progressing = herdr_nexus_wire::deadline::DeadlineStream::new(stream, progress_timeout)
+        .map_err(ServerError::Io)?;
+    progressing
+        .read_exact(&mut prefix[1..])
+        .map_err(ServerError::Io)?;
+    let length = usize::try_from(u32::from_be_bytes(prefix))
+        .map_err(|_| ServerError::Signal("subscription frame length is not representable".into()))?;
+    if length > capacity {
+        return Err(ServerError::Signal(format!(
+            "subscription frame length {length} exceeds capacity {capacity}"
+        )));
+    }
+    let mut body = vec![0_u8; length];
+    progressing.read_exact(&mut body).map_err(ServerError::Io)?;
+    Ok(Some(body))
+}
+
 fn forward_meta(
     place: &Place,
     caller: crate::transport_types::Caller,
@@ -582,11 +652,12 @@ fn forward_meta(
     )?;
     match response {
         herdr_nexus_wire::meta_call::Response::Answered(output) => match output.0 {
-            core_meta_herdr_nexus::Response::Configured(readiness) => {
+            core_meta_herdr_nexus::Response::Configured(configured) => {
                 Ok(meta_signal_herdr_nexus::Response::Configured(
                     meta_signal_herdr_nexus::Configured_Data {
+                        set: public_setting(configured.core_set),
                         owner: meta_signal_herdr_nexus::Owner::Nexus,
-                        readiness,
+                        readiness: configured.readiness,
                     },
                 ))
             }
@@ -595,6 +666,21 @@ fn forward_meta(
             }
         },
         herdr_nexus_wire::meta_call::Response::Failed(message) => Err(ServerError::Signal(message)),
+    }
+}
+
+fn public_setting(setting: core_meta_herdr_nexus::CoreSet) -> meta_signal_herdr_nexus::Set {
+    match setting {
+        core_meta_herdr_nexus::CoreSet::StartTimeout(value) =>
+            meta_signal_herdr_nexus::Set::StartTimeout(value),
+        core_meta_herdr_nexus::CoreSet::Polling(value) =>
+            meta_signal_herdr_nexus::Set::Polling(value),
+        core_meta_herdr_nexus::CoreSet::FrameCapacity(value) =>
+            meta_signal_herdr_nexus::Set::FrameCapacity(value),
+        core_meta_herdr_nexus::CoreSet::TransportTimeout(value) =>
+            meta_signal_herdr_nexus::Set::TransportTimeout(value),
+        core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value) =>
+            meta_signal_herdr_nexus::Set::SubscriberCapacity(value),
     }
 }
 
@@ -632,6 +718,7 @@ fn setting_name(setting: &meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nex
         Set::Polling(_) => SettingName::Polling,
         Set::FrameCapacity(_) => SettingName::FrameCapacity,
         Set::TransportTimeout(_) => SettingName::TransportTimeout,
+        Set::SubscriberCapacity(_) => SettingName::SubscriberCapacity,
     }
 }
 
@@ -1469,5 +1556,44 @@ mod tests {
         drop(first);
         assert!(!path.exists());
         fs::remove_dir(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn subscription_frame_may_be_quiet_beyond_call_timeout() {
+        use std::io::Write;
+        let (mut writer, reader) = UnixStream::pair().expect("socket pair");
+        let reading = std::thread::spawn(move || {
+            read_subscription_signal_frame(reader, Duration::from_millis(30), 32)
+        });
+        std::thread::sleep(Duration::from_millis(75));
+        writer.write_all(&3_u32.to_be_bytes()).expect("prefix");
+        writer.write_all(b"new").expect("body");
+        assert_eq!(
+            reading.join().expect("reader thread").expect("frame"),
+            Some(b"new".to_vec())
+        );
+    }
+
+    #[test]
+    fn subscription_partial_frame_has_one_absolute_progress_deadline() {
+        use std::io::Write;
+        let (mut writer, reader) = UnixStream::pair().expect("socket pair");
+        writer.write_all(&[0]).expect("first prefix byte");
+        let started = Instant::now();
+        let failure = read_subscription_signal_frame(reader, Duration::from_millis(30), 32)
+            .expect_err("partial frame must time out");
+        assert!(started.elapsed() < Duration::from_millis(250));
+        assert!(matches!(failure, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn subscription_peer_shutdown_ends_the_stream() {
+        let (writer, reader) = UnixStream::pair().expect("socket pair");
+        drop(writer);
+        assert_eq!(
+            read_subscription_signal_frame(reader, Duration::from_millis(30), 32)
+                .expect("clean shutdown"),
+            None
+        );
     }
 }

@@ -4,6 +4,7 @@ Library
 [ UserId.Integer                                      ; types
   GroupId.Integer
   ProcessId.Integer
+  PeerIdentity.{ UserId ProcessId }
   Caller.{ UserId GroupId ProcessId }
   Lane.[ PublicText MetaText EmissionSignal ]
   Kind.[ Request Answered Failed ]
@@ -17,7 +18,7 @@ Library
   FrameDeadlineMilliseconds.Integer
   FrameCapacityBytes.Integer
   Admission.{ FrameDeadlineMilliseconds FrameCapacityBytes }
-  CoreBootstrap.{ Place Admission }
-  TranslatorBootstrap.{ Place Admission BudgetValue } ]
+  CoreBootstrap.{ Place Admission PeerIdentity }
+  TranslatorBootstrap.{ Place Admission BudgetValue PeerIdentity } ]
 []                                                    ; traits
 []                                                    ; associations

@@ -12,11 +12,8 @@ pub struct OwnedPane {
     pub workspace: signal_herdr_nexus::Workspace,
     pub label_option: std::option::Option<signal_herdr_nexus::Label>,
     pub state: signal_herdr_nexus::State,
+    pub attempt: signal_herdr_nexus::Attempt,
 }
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Reconciliation(pub crate::Operation);
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]

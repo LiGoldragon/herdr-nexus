@@ -8,11 +8,10 @@ pub mod generated;
 pub use generated::operation::Operation;
 
 use emission_herdr_nexus::PaneObservation;
-use generated::memory::{Answer, OwnedPane, Reconciliation};
-use generated::operation::{Pressing_Data, Prompting_Data, Starting_Data};
+use generated::memory::{Answer, OwnedPane};
 use signal_herdr_nexus::{
-    Command, Keys, Known, Label, MemoryRefusal, ObservedEffect, Outcome, Pane, Refusal, Session,
-    State, StorePhase, StoreRefusal, Text, Workspace,
+    Attempt, Command, Keys, Known, Label, MemoryRefusal, ObservedEffect, Outcome, Pane, Refusal,
+    Session, State, StorePhase, StoreRefusal, Text, Workspace,
 };
 use std::collections::HashMap;
 
@@ -34,7 +33,7 @@ pub trait Memory {
     ) -> Result<Vec<Known>, MemoryRefusal>;
     fn store_owned(&mut self, pane: OwnedPane) -> Answer;
     fn close_owned(&mut self, pane: &Pane) -> Answer;
-    fn store_uncertain(&mut self, reconciliation: Reconciliation) -> Answer;
+    fn store_attempt(&mut self, pane: &Pane, attempt: Attempt) -> Answer;
     fn reconcile_listing(
         &mut self,
         session: &Session,
@@ -45,14 +44,9 @@ pub trait Memory {
 #[derive(Default)]
 pub struct InMemory {
     panes: HashMap<Pane, OwnedPane>,
-    uncertain: Vec<Reconciliation>,
 }
 
 impl InMemory {
-    pub fn uncertain(&self) -> &[Reconciliation] {
-        &self.uncertain
-    }
-
     fn project_listing(&self, session: &Session, observed: &[PaneObservation]) -> Vec<Known> {
         let by_pane: HashMap<&Pane, &PaneObservation> =
             observed.iter().map(|seen| (&seen.pane, seen)).collect();
@@ -64,6 +58,7 @@ impl InMemory {
                     pane: owned.pane.clone(),
                     label,
                     state: reconciled_state(owned, by_pane.get(&owned.pane).copied()),
+                    attempt: owned.attempt.clone(),
                 })
             })
             .collect()
@@ -102,15 +97,9 @@ impl Memory for InMemory {
         Answer::Succeeded
     }
 
-    fn store_uncertain(&mut self, reconciliation: Reconciliation) -> Answer {
-        if let Some(existing) = self
-            .uncertain
-            .iter_mut()
-            .find(|existing| same_uncertainty_locus(&existing.0, &reconciliation.0))
-        {
-            *existing = reconciliation;
-        } else {
-            self.uncertain.push(reconciliation);
+    fn store_attempt(&mut self, pane: &Pane, attempt: Attempt) -> Answer {
+        if let Some(owned) = self.panes.get_mut(pane) {
+            owned.attempt = attempt;
         }
         Answer::Succeeded
     }
@@ -128,6 +117,7 @@ impl Memory for InMemory {
             .filter(|owned| &owned.pane.session == session)
         {
             owned.state = reconciled_state(owned, by_pane.get(&owned.pane).copied());
+            owned.attempt = Attempt::Settled;
         }
         Answer::Succeeded
     }
@@ -143,27 +133,6 @@ fn reconciled_state(owned: &OwnedPane, seen: Option<&PaneObservation>) -> State 
             State::Dead
         }
         Some(seen) => seen.state.clone(),
-    }
-}
-
-fn same_uncertainty_locus(left: &Operation, right: &Operation) -> bool {
-    use Operation::*;
-    fn pane(attempt: &Operation) -> Option<&Pane> {
-        match attempt {
-            Starting(data) => Some(&data.pane),
-            Prompting(data) => Some(&data.pane),
-            Pressing(data) => Some(&data.pane),
-            Closing(pane) => Some(pane),
-            _ => None,
-        }
-    }
-    if let (Some(left), Some(right)) = (pane(left), pane(right)) {
-        return left == right;
-    }
-    match (left, right) {
-        (Listing(a), Listing(b)) | (Subscribing(a), Subscribing(b)) => a == b,
-        (Creating(_), Creating(_)) => true,
-        _ => false,
     }
 }
 
@@ -183,7 +152,6 @@ impl<M> Core<M> {
 
 impl<M: Memory> Core<M> {
     pub fn create(&mut self, workspace: Workspace, external: ExternalResult<Pane>) -> Outcome {
-        let operation = Operation::Creating(workspace.clone());
         match external {
             ExternalResult::Succeeded(pane) => {
                 let owned = OwnedPane {
@@ -191,6 +159,7 @@ impl<M: Memory> Core<M> {
                     workspace,
                     label_option: None,
                     state: State::Open,
+                    attempt: Attempt::Settled,
                 };
                 match self.memory.store_owned(owned) {
                     Answer::Succeeded => Outcome::Created(pane),
@@ -201,22 +170,17 @@ impl<M: Memory> Core<M> {
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
             ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
-            ExternalResult::Uncertain => self.retain_uncertain(operation),
+            ExternalResult::Uncertain => Outcome::Uncertain,
         }
     }
 
     pub fn start(
         &mut self,
         pane: Pane,
-        command: Command,
+        _command: Command,
         label: Label,
         external: ExternalResult<State>,
     ) -> Outcome {
-        let operation = Operation::Starting(Starting_Data {
-            pane: pane.clone(),
-            command,
-            label: label.clone(),
-        });
         let mut owned = match self.require_owned(&pane) {
             Ok(owned) => owned,
             Err(outcome) => return outcome,
@@ -225,6 +189,7 @@ impl<M: Memory> Core<M> {
             ExternalResult::Succeeded(state) => {
                 owned.label_option = Some(label);
                 owned.state = state;
+                owned.attempt = Attempt::Settled;
                 match self.memory.store_owned(owned) {
                     Answer::Succeeded => Outcome::Done,
                     Answer::Failed(refusal) => {
@@ -234,22 +199,22 @@ impl<M: Memory> Core<M> {
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
             ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
-            ExternalResult::Uncertain => self.retain_uncertain(operation),
+            ExternalResult::Uncertain => self.retain_uncertain(&pane),
         }
     }
 
-    pub fn prompt(&mut self, pane: Pane, text: Text, external: ExternalResult<()>) -> Outcome {
+    pub fn prompt(&mut self, pane: Pane, _text: Text, external: ExternalResult<()>) -> Outcome {
         if let Err(outcome) = self.require_owned(&pane) {
             return outcome;
         }
-        self.finish_done(Operation::Prompting(Prompting_Data { pane, text }), external)
+        self.finish_done(pane, external)
     }
 
-    pub fn press(&mut self, pane: Pane, keys: Keys, external: ExternalResult<()>) -> Outcome {
+    pub fn press(&mut self, pane: Pane, _keys: Keys, external: ExternalResult<()>) -> Outcome {
         if let Err(outcome) = self.require_owned(&pane) {
             return outcome;
         }
-        self.finish_done(Operation::Pressing(Pressing_Data { pane, keys }), external)
+        self.finish_done(pane, external)
     }
 
     pub fn close(&mut self, pane: Pane, external: ExternalResult<()>) -> Outcome {
@@ -263,7 +228,7 @@ impl<M: Memory> Core<M> {
             },
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
             ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
-            ExternalResult::Uncertain => self.retain_uncertain(Operation::Closing(pane)),
+            ExternalResult::Uncertain => self.retain_uncertain(&pane),
         }
     }
 
@@ -293,12 +258,17 @@ impl<M: Memory> Core<M> {
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
             ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
-            ExternalResult::Uncertain => self.retain_uncertain(Operation::Listing(session)),
+            ExternalResult::Uncertain => Outcome::Uncertain,
         }
     }
 
-    pub fn subscribe(&mut self, session: Session, external: ExternalResult<()>) -> Outcome {
-        self.finish_done(Operation::Subscribing(session), external)
+    pub fn subscribe(&mut self, _session: Session, external: ExternalResult<()>) -> Outcome {
+        match external {
+            ExternalResult::Succeeded(()) => Outcome::Done,
+            ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
+            ExternalResult::Uncertain => Outcome::Uncertain,
+        }
     }
 
     fn require_owned(&self, pane: &Pane) -> Result<OwnedPane, Outcome> {
@@ -330,17 +300,23 @@ impl<M: Memory> Core<M> {
             .map_err(|refusal| store_refused(refusal, StorePhase::BeforeEmission))
     }
 
-    fn finish_done(&mut self, attempt: Operation, external: ExternalResult<()>) -> Outcome {
+    fn finish_done(&mut self, pane: Pane, external: ExternalResult<()>) -> Outcome {
         match external {
-            ExternalResult::Succeeded(()) => Outcome::Done,
+            ExternalResult::Succeeded(()) => match self.memory.store_attempt(&pane, Attempt::Settled) {
+                Answer::Succeeded => Outcome::Done,
+                Answer::Failed(refusal) => store_refused(
+                    refusal,
+                    StorePhase::Observed(ObservedEffect::Done),
+                ),
+            },
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
             ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
-            ExternalResult::Uncertain => self.retain_uncertain(attempt),
+            ExternalResult::Uncertain => self.retain_uncertain(&pane),
         }
     }
 
-    fn retain_uncertain(&mut self, attempt: Operation) -> Outcome {
-        match self.memory.store_uncertain(Reconciliation(attempt)) {
+    fn retain_uncertain(&mut self, pane: &Pane) -> Outcome {
+        match self.memory.store_attempt(pane, Attempt::Uncertain) {
             Answer::Succeeded => Outcome::Uncertain,
             Answer::Failed(refusal) => store_refused(refusal, StorePhase::Uncertain),
         }
@@ -365,7 +341,7 @@ mod tests {
         Owned,
         StoreOwned,
         CloseOwned,
-        StoreUncertain,
+        StoreAttempt,
         ReconcileListing,
     }
 
@@ -429,9 +405,9 @@ mod tests {
             }
         }
 
-        fn store_uncertain(&mut self, reconciliation: Reconciliation) -> Answer {
-            match self.refusal(Call::StoreUncertain) {
-                Answer::Succeeded => self.memory.store_uncertain(reconciliation),
+        fn store_attempt(&mut self, pane: &Pane, attempt: Attempt) -> Answer {
+            match self.refusal(Call::StoreAttempt) {
+                Answer::Succeeded => self.memory.store_attempt(pane, attempt),
                 failed => failed,
             }
         }
@@ -475,6 +451,7 @@ mod tests {
                 workspace: workspace(),
                 label_option: Some(Label("mind/versionOne".into())),
                 state: State::Open,
+                attempt: Attempt::Settled,
             })
             ;
         memory
@@ -514,23 +491,20 @@ mod tests {
     }
 
     #[test]
-    fn uncertainty_is_retained_for_reconciliation() {
+    fn uncertainty_is_bounded_by_the_owned_pane() {
         let mut core = Core::new(seeded());
         assert_eq!(
             core.prompt(pane(), Text("hello".into()), ExternalResult::Uncertain),
             Outcome::Uncertain
         );
         assert_eq!(
-            core.memory().uncertain(),
-            &[Reconciliation(Operation::Prompting(Prompting_Data {
-                pane: pane(),
-                text: Text("hello".into()),
-            }))]
+            core.memory().owned(&pane()).expect("read").expect("owned").attempt,
+            Attempt::Uncertain
         );
     }
 
     #[test]
-    fn repeated_uncertainty_replaces_the_one_record_for_its_pane() {
+    fn repeated_uncertainty_remains_one_owned_pane_fact() {
         let mut core = Core::new(seeded());
         assert_eq!(
             core.prompt(pane(), Text("hello".into()), ExternalResult::Uncertain),
@@ -540,11 +514,8 @@ mod tests {
             core.press(pane(), Keys(vec!["x".into()]), ExternalResult::Uncertain),
             Outcome::Uncertain
         );
-        assert_eq!(core.memory().uncertain().len(), 1);
-        assert_eq!(core.memory().uncertain()[0].0, Operation::Pressing(Pressing_Data {
-            pane: pane(),
-            keys: Keys(vec!["x".into()]),
-        }));
+        let owned = core.memory().owned(&pane()).expect("read").expect("owned");
+        assert_eq!(owned.attempt, Attempt::Uncertain);
     }
 
     #[test]
@@ -562,7 +533,7 @@ mod tests {
 
     #[test]
     fn uncertainty_store_refusal_is_distinct() {
-        let mut core = Core::new(RefusingMemory::new(seeded(), Call::StoreUncertain));
+        let mut core = Core::new(RefusingMemory::new(seeded(), Call::StoreAttempt));
         let outcome = core.press(pane(), Keys(vec!["x".into()]), ExternalResult::Uncertain);
         assert!(matches!(
             outcome,
@@ -583,6 +554,7 @@ mod tests {
                 pane: pane(),
                 label: Label("mind/versionOne".into()),
                 state: State::Dead,
+                attempt: Attempt::Settled,
             }])
         );
     }

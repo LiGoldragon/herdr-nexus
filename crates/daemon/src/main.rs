@@ -18,6 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(
         &place.place,
         admission,
+        place.peer_identity,
     )?);
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(
         bootstrap.paths(),
@@ -49,17 +50,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(body))
                         .restore()?;
                 let herdr_nexus_wire::public_call::Query::Call(call) = call;
-                if !herdr_nexus_daemon::same_login(&call.caller) {
-                    let refusal = herdr_nexus_wire::public_call::Response::Failed(
-                        "caller is outside the bound login".into(),
-                    );
-                    let mut output = herdr_nexus_daemon::DeadlineStream::new(
-                        stream,
-                        configuration.transport_timeout,
-                    )?;
-                    output.write_frame(&refusal.signalize()?, capacity)?;
-                    return Ok(());
-                }
                 let query = call.input.0;
                 if let signal_herdr_nexus::Query::Subscribe(session) = query {
                     return dispatcher.subscribe(stream, session, configuration);

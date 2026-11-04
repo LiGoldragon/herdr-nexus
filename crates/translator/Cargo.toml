@@ -18,7 +18,7 @@ datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d9
 
 [dependencies.signal-herdr-nexus]
 git = "https://github.com/LiGoldragon/signal-herdr-nexus"
-rev = "04aaeef71ce005f78d4f1d58e4697d04d8c02dc1"
+rev = "4f9705e"
 
 [dependencies.shared-translator]
 package = "translator"
@@ -38,7 +38,7 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "b786f020c4fdcc884405dfad4cd74d5b56ff08a5"
+rev = "103d086"
 features = ["datom"]
 
 [[bin]]

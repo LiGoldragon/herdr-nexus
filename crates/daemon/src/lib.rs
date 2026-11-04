@@ -67,12 +67,14 @@ pub struct Bootstrap {
     public: std::sync::Mutex<Option<OwnedListener>>,
     public_ready: std::sync::Condvar,
     admission: herdr_nexus_wire::ValidAdmission,
+    translator_peer: herdr_nexus_wire::transport_types::PeerIdentity,
 }
 
 impl Bootstrap {
     pub fn bind(
         place: &shared_translator::placement::Place,
         admission: herdr_nexus_wire::ValidAdmission,
+        translator_peer: herdr_nexus_wire::transport_types::PeerIdentity,
     ) -> std::io::Result<Self> {
         let paths = SocketPaths::from(place);
         let meta = OwnedListener::bind(paths.meta.clone())?;
@@ -83,6 +85,7 @@ impl Bootstrap {
             public: std::sync::Mutex::new(None),
             public_ready: std::sync::Condvar::new(),
             admission,
+            translator_peer,
         })
     }
 
@@ -117,6 +120,7 @@ impl Bootstrap {
 
     pub fn serve_next_meta(&self) -> Result<(), Box<dyn std::error::Error>> {
         let (stream, _) = self.meta.listener.accept()?;
+        require_peer(&stream, &self.translator_peer)?;
         let mut stream = DeadlineStream::new(stream, self.admission.deadline)?;
         serve_meta_once(
             &mut stream,
@@ -136,16 +140,37 @@ impl Bootstrap {
                 .wait(public)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
-        public
-            .as_ref()
-            .expect("public listener notified only after binding")
-            .listener
-            .accept()
-            .map(|(stream, _)| stream)
+        loop {
+            let stream = public
+                .as_ref()
+                .expect("public listener notified only after binding")
+                .listener
+                .accept()
+                .map(|(stream, _)| stream)?;
+            if require_peer(&stream, &self.translator_peer).is_ok() {
+                return Ok(stream);
+            }
+        }
     }
 
     pub fn paths(&self) -> &SocketPaths {
         &self.paths
+    }
+}
+
+fn require_peer(
+    stream: &std::os::unix::net::UnixStream,
+    expected: &herdr_nexus_wire::transport_types::PeerIdentity,
+) -> std::io::Result<()> {
+    let actual = herdr_nexus_wire::frame::peer_caller(stream)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    if actual.user_id == expected.user_id && actual.process_id == expected.process_id {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "peer is not the paired translator",
+        ))
     }
 }
 
@@ -164,18 +189,13 @@ where
     let query =
         Signal::<herdr_nexus_wire::meta_call::Query>::from(Vec::<u8>::from(frame)).restore()?;
     let response = match query {
-        herdr_nexus_wire::meta_call::Query::Call(call) if same_login(&call.caller) => {
+        herdr_nexus_wire::meta_call::Query::Call(call) => {
             let response = match call.input.0 {
                 core_meta_herdr_nexus::Query::Configure(setting) => configure(setting),
             };
             herdr_nexus_wire::meta_call::Response::Answered(herdr_nexus_wire::meta_payload::Output(
                 response,
             ))
-        }
-        herdr_nexus_wire::meta_call::Query::Call(_) => {
-            herdr_nexus_wire::meta_call::Response::Failed(
-                "caller is outside the bound login".into(),
-            )
         }
     };
     stream.write_frame(&response.signalize()?, capacity)?;
@@ -199,14 +219,9 @@ where
     let query =
         Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(frame)).restore()?;
     let response = match query {
-        herdr_nexus_wire::public_call::Query::Call(call) if same_login(&call.caller) => {
+        herdr_nexus_wire::public_call::Query::Call(call) => {
             herdr_nexus_wire::public_call::Response::Answered(
                 herdr_nexus_wire::public_payload::Output(handle(call.input.0)),
-            )
-        }
-        herdr_nexus_wire::public_call::Query::Call(_) => {
-            herdr_nexus_wire::public_call::Response::Failed(
-                "caller is outside the bound login".into(),
             )
         }
     };
@@ -319,6 +334,7 @@ impl Dispatcher {
                 start_timeout: Duration::from_millis(20),
                 frame_capacity_bytes: 4096,
                 transport_timeout: Duration::from_millis(30),
+                subscriber_capacity: 8,
             }));
         let mut dispatcher = Self::new(paths, configuration);
         dispatcher.emitter = emitter;
@@ -894,6 +910,7 @@ pub struct RuntimeConfiguration {
     pub start_timeout: Duration,
     pub frame_capacity_bytes: usize,
     pub transport_timeout: Duration,
+    pub subscriber_capacity: usize,
 }
 
 #[derive(Clone, Default)]
@@ -902,6 +919,7 @@ struct PartialConfiguration {
     start_timeout: Option<Duration>,
     frame_capacity_bytes: Option<usize>,
     transport_timeout: Option<Duration>,
+    subscriber_capacity: Option<usize>,
 }
 
 #[derive(Default)]
@@ -925,6 +943,7 @@ impl ConfigurationStore {
             .read()
             .unwrap_or_else(|p| p.into_inner())
             .clone();
+        let applied = setting.clone();
         let (name, valid) = match setting {
             core_meta_herdr_nexus::CoreSet::StartTimeout(value) => (
                 SettingName::StartTimeout,
@@ -952,6 +971,14 @@ impl ConfigurationStore {
                     .map(|value| candidate.transport_timeout = Some(value))
                     .is_some(),
             ),
+            core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value) => (
+                SettingName::SubscriberCapacity,
+                usize::try_from(value)
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .map(|value| candidate.subscriber_capacity = Some(value))
+                    .is_some(),
+            ),
         };
         let cross_valid = match (candidate.transport_timeout, candidate.start_timeout) {
             (Some(transport), Some(start)) => transport > start,
@@ -977,17 +1004,20 @@ impl ConfigurationStore {
             &candidate.start_timeout,
             &candidate.frame_capacity_bytes,
             &candidate.transport_timeout,
+            &candidate.subscriber_capacity,
         ) {
             (
                 Some(polling),
                 Some(start_timeout),
                 Some(frame_capacity_bytes),
                 Some(transport_timeout),
+                Some(subscriber_capacity),
             ) => Some(RuntimeConfiguration {
                 polling: *polling,
                 start_timeout: *start_timeout,
                 frame_capacity_bytes: *frame_capacity_bytes,
                 transport_timeout: *transport_timeout,
+                subscriber_capacity: *subscriber_capacity,
             }),
             _ => None,
         };
@@ -1006,7 +1036,10 @@ impl ConfigurationStore {
         if let Some(validated) = validated {
             *self.current.write().unwrap_or_else(|p| p.into_inner()) = Some(Arc::new(validated));
         }
-        Response::Configured(readiness)
+        Response::Configured(core_meta_herdr_nexus::Configured_Data {
+            core_set: applied,
+            readiness,
+        })
     }
 
     pub fn snapshot(&self) -> Option<Arc<RuntimeConfiguration>> {
@@ -1031,6 +1064,9 @@ fn readiness(candidate: &PartialConfiguration) -> meta_signal_herdr_nexus::Readi
     }
     if candidate.transport_timeout.is_none() {
         awaiting.push(SettingName::TransportTimeout);
+    }
+    if candidate.subscriber_capacity.is_none() {
+        awaiting.push(SettingName::SubscriberCapacity);
     }
     if awaiting.is_empty() {
         Readiness::Ready
@@ -1080,6 +1116,7 @@ mod tests {
             start_timeout: Duration::from_millis(20),
             frame_capacity_bytes: 4096,
             transport_timeout: Duration::from_millis(30),
+            subscriber_capacity: 8,
         })
     }
 
@@ -1460,6 +1497,7 @@ mod tests {
             start_timeout: Duration::from_millis(20),
             frame_capacity_bytes: 4096,
             transport_timeout: Duration::from_millis(30),
+            subscriber_capacity: 8,
         });
         *dispatcher.configuration.current.write().expect("configuration") = Some(Arc::clone(&slow));
         let (server_a, mut client_a) = std::os::unix::net::UnixStream::pair().expect("pair a");
@@ -1504,6 +1542,7 @@ mod tests {
             start_timeout: Duration::from_millis(25),
             frame_capacity_bytes: 4096,
             transport_timeout: Duration::from_millis(40),
+            subscriber_capacity: 8,
         });
         *dispatcher.configuration.current.write().expect("configuration") = Some(replacement);
         let deadline = Instant::now() + Duration::from_millis(300);
