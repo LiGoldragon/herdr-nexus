@@ -28,12 +28,15 @@ fn execute(config:meta_signal_herdr_nexus::Configuration, herdr:Herdr)->External
 }
 fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
  Verb::WorkspaceCreate(d)=>(vec!["workspace".into(),"create".into(),"--cwd".into(),d.root.0.clone()],None,"workspace"),
- Verb::AgentStart(d)=>{let mut a=vec!["agent".into(),"start".into(),d.command.agent_name.0.clone(),"--kind".into(),format!("{:?}",d.command.agent_kind).to_lowercase(),"--pane".into(),d.pane_id.0.clone()]; if let signal_herdr_nexus::Executable::Explicit(p)=&d.command.executable{a.extend(["--executable".into(),p.0.clone()]);} a.extend(d.command.string_vector.clone());(a,Some(d.pane_id.0.clone()),"start")},
+ Verb::AgentStart(d)=>{let mut a=vec!["agent".into(),"start".into(),d.command.agent_name.0.clone(),"--kind".into(),format!("{:?}",d.command.agent_kind).to_lowercase(),"--pane".into(),d.pane_id.0.clone()]; if let signal_herdr_nexus::Executable::Explicit(p)=&d.command.executable{a.extend(["--executable".into(),p.0.clone()]);} if !d.command.string_vector.is_empty(){a.push("--".into());} a.extend(d.command.string_vector.clone());(a,Some(d.pane_id.0.clone()),"start")},
  Verb::AgentPrompt(d)=>(vec!["agent".into(),"prompt".into(),d.pane_id.0.clone(),d.text.0.clone()],Some(d.pane_id.0.clone()),"prompt"),
- Verb::Keys(d)=>(vec!["pane".into(),"keys".into(),d.pane_id.0.clone()],Some(d.pane_id.0.clone()),"keys"),
+ Verb::Keys(d)=>(vec!["pane".into(),"send-keys".into(),d.pane_id.0.clone()],Some(d.pane_id.0.clone()),"keys"),
  Verb::PaneClose(id)=>(vec!["pane".into(),"close".into(),id.0.clone()],Some(id.0.clone()),"close"),
  Verb::PaneList=>(vec!["pane".into(),"list".into()],None,"list")}}
-fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}}
+fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){
+  let expected=match kind {"prompt"=>"agent_prompted","keys"=>"keys_sent","close"=>"pane_closed",_=>""};
+  if value.pointer("/result/type").and_then(|v|v.as_str())==Some(expected){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}
+ }else{ExternalOutcome::Uncertain}}
 fn parse_list(value:&serde_json::Value,session:signal_herdr_nexus::Session)->ExternalOutcome {
  let items_value=value.pointer("/result/panes").or_else(|| value.pointer("/result"));
  let Some(items)=items_value.and_then(|v|v.as_array()) else { return ExternalOutcome::Uncertain };
