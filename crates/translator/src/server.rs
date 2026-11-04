@@ -533,7 +533,7 @@ fn forward_public(
             caller,
             input: herdr_nexus_wire::public_payload::Input(input),
         });
-    let response: herdr_nexus_wire::public_call::Response = binary_call(
+    let response: herdr_nexus_wire::public_call::Response = public_binary_call(
         Path::new(&place.directory.0).join("herdr.sock"),
         request,
         timeout,
@@ -544,6 +544,36 @@ fn forward_public(
             Err(ServerError::Signal(message))
         }
     }
+}
+
+/// Public attempts are bounded by the Nexus's attempt-specific configuration.
+/// CallTimeout bounds request submission and response-frame progress, not the
+/// quiet interval while the Nexus is still performing the attempt.
+fn public_binary_call<Q, R>(path: PathBuf, query: Q, timeout: Duration) -> Result<R, ServerError>
+where
+    Q: signal::Signalizable,
+    R: rkyv::Archive,
+    Signal<R>: shared_translator::Restorable<R>,
+{
+    use shared_translator::FrameWriting;
+    let stream = UnixStream::connect(path).map_err(ServerError::Io)?;
+    let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
+        stream.try_clone().map_err(ServerError::Io)?,
+        timeout,
+    )
+    .map_err(ServerError::Io)?;
+    let request = query
+        .signalize()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+    let capacity = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
+    output
+        .write_frame(&request, capacity)
+        .map_err(ServerError::Frame)?;
+    let response = read_subscription_signal_frame(stream, timeout, MAXIMUM_SIGNAL_BYTES)?
+        .ok_or_else(|| ServerError::Signal("Nexus closed without an answer".into()))?;
+    Signal::<R>::from(response)
+        .restore()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))
 }
 
 fn forward_public_stream(
@@ -1653,5 +1683,94 @@ mod tests {
                 .expect("clean shutdown"),
             None
         );
+    }
+
+    #[test]
+    fn actual_text_front_start_outlives_generic_call_timeout() {
+        use meta_signal_herdr_nexus::{
+            BudgetValue, ByteLimit, DepthLimit, NodeLimit, PathValue, Set, Timeout,
+        };
+        use shared_translator::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
+
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-front-start-timeout-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let core_path = directory.join("herdr.sock");
+        let front_path = directory.join("herdr-translator.sock");
+        let core_listener = UnixListener::bind(&core_path).expect("core fixture socket");
+        let front_listener = UnixListener::bind(&front_path).expect("front fixture socket");
+
+        let core = std::thread::spawn(move || {
+            let (mut stream, _) = core_listener.accept().expect("core connection");
+            let body = stream
+                .read_frame(FrameCapacity::from(MAXIMUM_SIGNAL_BYTES))
+                .expect("typed public Call");
+            let call = Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::from(body))
+                .restore()
+                .expect("restore public Call");
+            assert!(matches!(
+                call,
+                herdr_nexus_wire::public_call::Query::Call(ref data)
+                    if matches!(data.input.0, signal_herdr_nexus::Query::Start(_))
+            ));
+            std::thread::sleep(Duration::from_millis(75));
+            let response = herdr_nexus_wire::public_call::Response::Answered(
+                herdr_nexus_wire::public_payload::Output(
+                    signal_herdr_nexus::Response::Started(signal_herdr_nexus::Outcome::Done),
+                ),
+            )
+            .signalize()
+            .expect("response signal");
+            stream
+                .write_frame(&response, FrameCapacity::from(MAXIMUM_SIGNAL_BYTES))
+                .expect("delayed response");
+        });
+
+        let configuration = TranslatorConfiguration::default();
+        let _ = configuration.apply(Set::HerdrPath(PathValue("/bin/true".into())));
+        let _ = configuration.apply(Set::CallTimeout(Timeout(20)));
+        let _ = configuration.apply(Set::OutputLimit(ByteLimit(4096)));
+        let _ = configuration.apply(Set::TextBudget(BudgetValue {
+            node_limit: NodeLimit(4096),
+            depth_limit: DepthLimit(32),
+        }));
+        assert!(configuration.ready().is_some());
+        let place = Place {
+            metaflow_name: shared_translator::placement::MetaflowName("fixture".into()),
+            directory: shared_translator::placement::Directory(
+                directory.to_string_lossy().into_owned(),
+            ),
+        };
+        let front = std::thread::spawn(move || {
+            let (mut stream, _) = front_listener.accept().expect("front connection");
+            serve_one(
+                &mut stream,
+                &configuration,
+                &place,
+                Endpoint::Public,
+                herdr_nexus_wire::ValidAdmission {
+                    deadline: Duration::from_secs(1),
+                    frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                },
+                (4096, 32),
+            )
+            .expect("front request");
+        });
+
+        let began = Instant::now();
+        let answer = crate::TextClient::new(&front_path, MAXIMUM_SIGNAL_BYTES)
+            .request(
+                crate::transport_types::Lane::PublicText,
+                "Start.{ { s p } { a Codex Configured [] } label }",
+            )
+            .expect("Start answer");
+        assert!(began.elapsed() > Duration::from_millis(20));
+        assert_eq!(answer, "Started.Done");
+        front.join().expect("front thread");
+        core.join().expect("core thread");
+        std::fs::remove_dir_all(directory).expect("fixture cleanup");
     }
 }
