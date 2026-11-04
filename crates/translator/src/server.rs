@@ -1,83 +1,710 @@
+use crate::runner::{self, Captured};
+use emission_herdr_nexus::{ExternalOutcome, Herdr, PaneObservation, Verb};
+use meta_signal_herdr_nexus::Configuration;
+use serde::Deserialize;
 use shared_translator::placement::Place;
-use emission_herdr_nexus::{ExternalOutcome, Herdr, Verb};
-use signal_herdr_nexus::{Pane, PaneId, Refusal, ErrorCode, ExitStatus, Message, State};
-use std::{io::{Read}, os::unix::net::{UnixListener,UnixStream}, process::{Command,Stdio}, thread, time::{Duration,Instant}};
-use shared_translator::{FrameReading,FrameWriting,Restorable,Signal,Signalizable};
+use shared_translator::{
+    FrameCapacity, FrameReading, FrameWriting, Restorable, Signal, Signalizable,
+};
+use signal_herdr_nexus::{
+    AgentKind, ErrorCode, Executable, ExitStatus, Message, Pane, PaneId, Refusal, Session, State,
+};
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
+use std::fs;
+use std::os::unix::fs::MetadataExt;
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+const SOCKET_NAME: &str = "herdr-translator.sock";
+const MAXIMUM_SIGNAL_BYTES: usize = 8 * 1024 * 1024;
 
 pub fn run(place: &Place) -> Result<(), ServerError> {
- let socket=std::path::Path::new(&place.directory.0).join("herdr-translator.sock");
- let listener=UnixListener::bind(socket).map_err(ServerError::Io)?;
- for stream in listener.incoming() { let Ok(mut stream)=stream else { continue }; let _=serve_one(&mut stream); }
- Ok(())
-}
-pub fn serve_one(stream:&mut UnixStream)->Result<(),ServerError>{
- let body=stream.read_frame(SharedCapacity::default()).map_err(ServerError::Frame)?;
- let request=Signal::<emission_herdr_nexus::Query>::from(Vec::from(body)).restore().map_err(|e|ServerError::Signal(format!("{e:?}")))?;
- let emission_herdr_nexus::Query::Execute(data)=request;
- let outcome=execute(data.configuration,data.herdr);
- let response=emission_herdr_nexus::Response::Executed(outcome).signalize().map_err(|e|ServerError::Signal(format!("{e:?}")))?;
- stream.write_frame(&response,SharedCapacity::default()).map_err(ServerError::Frame)
-}
-use shared_translator::FrameCapacity as SharedCapacity;
-fn execute(config:meta_signal_herdr_nexus::Configuration, herdr:Herdr)->ExternalOutcome{
- let timeout=Duration::from_millis(config.call_timeout_milliseconds.0.max(1) as u64);
- let (mut argv,pane,kind)=argv_for(&herdr);
- argv.splice(0..0, ["--session".into(), herdr.session.0.clone()]);
- let output=match run_command(&config.herdr_executable.0,&argv,timeout){Ok(v)=>v,Err(RunError::Timeout)=>return ExternalOutcome::Uncertain,Err(RunError::Io(e))=>return refused("process_io",None,e.to_string())};
- if !output.status.success(){return refused("process_refused",Some(output.status.code().unwrap_or(-1) as i64),String::from_utf8_lossy(&output.stderr).into_owned());}
- if kind=="list" {
-  let mut agent_argv=vec!["--session".into(),herdr.session.0.clone(),"agent".into(),"list".into()];
-  let agents=match run_command(&config.herdr_executable.0,&agent_argv,timeout){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain};
-  if !agents.status.success(){return refused("agent_list_failed",Some(agents.status.code().unwrap_or(-1) as i64),String::from_utf8_lossy(&agents.stderr).into_owned());}
-  return parse_list_join(&output.stdout,&agents.stdout,herdr.session);
- }
- parse_success(&output.stdout,kind,pane,herdr.session)
-}
-fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
- Verb::WorkspaceCreate(d)=>(vec!["workspace".into(),"create".into(),"--cwd".into(),d.root.0.clone()],None,"workspace"),
- Verb::AgentStart(d)=>{let mut a=vec!["agent".into(),"start".into(),d.command.agent_name.0.clone(),"--kind".into(),format!("{:?}",d.command.agent_kind).to_lowercase(),"--pane".into(),d.pane_id.0.clone()]; if let signal_herdr_nexus::Executable::Explicit(p)=&d.command.executable{a.extend(["--executable".into(),p.0.clone()]);} if !d.command.string_vector.is_empty(){a.push("--".into());} a.extend(d.command.string_vector.clone());(a,Some(d.pane_id.0.clone()),"start")},
- Verb::AgentPrompt(d)=>(vec!["agent".into(),"prompt".into(),d.pane_id.0.clone(),d.text.0.clone()],Some(d.pane_id.0.clone()),"prompt"),
- Verb::Keys(d)=>(vec!["pane".into(),"send-keys".into(),d.pane_id.0.clone()],Some(d.pane_id.0.clone()),"keys"),
- Verb::PaneClose(id)=>(vec!["pane".into(),"close".into(),id.0.clone()],Some(id.0.clone()),"close"),
- Verb::PaneList=>(vec!["pane".into(),"list".into()],None,"list")}}
-
-#[derive(serde::Deserialize)] struct PaneJson { pane_id:String, terminal_id:String, workspace_id:String, tab_id:String, focused:bool, agent_status:String, revision:u64 }
-#[derive(serde::Deserialize)] struct AgentJson { pane_id:String, terminal_id:String, workspace_id:String, tab_id:String, focused:bool, revision:u64, agent_status:String, interactive_ready:bool }
-#[derive(serde::Deserialize)] struct PaneListResult { #[serde(rename="type")] kind:String, panes:Vec<PaneJson> }
-#[derive(serde::Deserialize)] struct AgentListResult { #[serde(rename="type")] kind:String, agents:Vec<AgentJson> }
-fn parse_list_join(panes:&[u8],agents:&[u8],session:signal_herdr_nexus::Session)->ExternalOutcome {
- let p:serde_json::Value=match serde_json::from_slice(panes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; let a:serde_json::Value=match serde_json::from_slice(agents){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain};
- let pr:PaneListResult=match serde_json::from_value(p.get("result").cloned().unwrap_or_default()){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; let ar:AgentListResult=match serde_json::from_value(a.get("result").cloned().unwrap_or_default()){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if pr.kind!="pane_list"||ar.kind!="agent_list"{return ExternalOutcome::Uncertain}
- let mut ids=std::collections::HashSet::new(); if pr.panes.iter().any(|x|!ids.insert(&x.pane_id)){return ExternalOutcome::Uncertain}; ids.clear(); if ar.agents.iter().any(|x|!ids.insert(&x.pane_id)){return ExternalOutcome::Uncertain};
- let mut out=Vec::new(); for p in pr.panes { let state=match ar.agents.iter().find(|a|a.pane_id==p.pane_id){None=>State::Open,Some(a)=>match (a.agent_status.as_str(),a.interactive_ready){("working",_)|("blocked",_)=>State::Busy,("idle",true)|("done",true)=>State::Idle,("idle",false)|("done",false)|("unknown",_)=>State::Open,_=>return ExternalOutcome::Uncertain}}; out.push(emission_herdr_nexus::PaneObservation{pane:Pane{session:session.clone(),pane_id:PaneId(p.pane_id)},state}); } ExternalOutcome::Listed(out)
+    let socket = Path::new(&place.directory.0).join(SOCKET_NAME);
+    let bound = OwnedSocket::bind(socket)?;
+    for stream in bound.listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let _ = serve_one(&mut stream);
+    }
+    Ok(())
 }
 
-fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){
-  let expected=match kind {"prompt"=>"agent_prompted","keys"=>"keys_sent","close"=>"pane_closed",_=>""};
-  if value.pointer("/result/type").and_then(|v|v.as_str())==Some(expected){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}
- }else{ExternalOutcome::Uncertain}}
-fn parse_list(value:&serde_json::Value,session:signal_herdr_nexus::Session)->ExternalOutcome {
- let items_value=value.pointer("/result/panes").or_else(|| value.pointer("/result"));
- let Some(items)=items_value.and_then(|v|v.as_array()) else { return ExternalOutcome::Uncertain };
- let mut observations=Vec::with_capacity(items.len());
- for item in items {
-  let Some(id)=item.get("pane_id").and_then(|v|v.as_str()) else { return ExternalOutcome::Uncertain };
-  let state=match item.get("interactive_ready").and_then(|v|v.as_bool()) { Some(true)=>State::Idle, Some(false)=>State::Busy, None=>State::Open };
-  observations.push(emission_herdr_nexus::PaneObservation{pane:Pane{session:session.clone(),pane_id:PaneId(id.into())},state});
- }
- ExternalOutcome::Listed(observations)
+pub fn serve_one(stream: &mut UnixStream) -> Result<(), ServerError> {
+    let maximum = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
+    let body = stream.read_frame(maximum).map_err(ServerError::Frame)?;
+    let request = Signal::<emission_herdr_nexus::Query>::from(Vec::from(body))
+        .restore()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+    let emission_herdr_nexus::Query::Execute(data) = request;
+    let response_capacity = frame_capacity(&data.configuration).unwrap_or(maximum);
+    let outcome = execute(&data.configuration, &data.herdr);
+    let response = emission_herdr_nexus::Response::Executed(outcome)
+        .signalize()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+    stream
+        .write_frame(&response, response_capacity)
+        .map_err(ServerError::Frame)
 }
-fn refused(code:&str,status:Option<i64>,message:String)->ExternalOutcome{ExternalOutcome::Refused(Refusal{error_code:ErrorCode(code.into()),exit_status_option:status.map(ExitStatus),message:Message(message)})}
-struct Output{status:std::process::ExitStatus,stdout:Vec<u8>,stderr:Vec<u8>}
-enum RunError{Io(std::io::Error),Timeout}
-fn run_command(program:&str,args:&[String],timeout:Duration)->Result<Output,RunError>{let mut child=Command::new(program).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(RunError::Io)?; let mut out=child.stdout.take().unwrap(); let mut err=child.stderr.take().unwrap(); let a=thread::spawn(move||{let mut b=Vec::new();let _=out.read_to_end(&mut b);b}); let b=thread::spawn(move||{let mut b=Vec::new();let _=err.read_to_end(&mut b);b}); let start=Instant::now(); loop{if let Some(status)=child.try_wait().map_err(RunError::Io)?{return Ok(Output{status,stdout:a.join().unwrap_or_default(),stderr:b.join().unwrap_or_default()})} if start.elapsed()>=timeout{let _=child.kill();let _=child.wait();return Err(RunError::Timeout)} thread::sleep(Duration::from_millis(5));}}
-#[derive(Debug)]pub enum ServerError{Io(std::io::Error),Frame(shared_translator::FrameError),Signal(String)}
 
-impl std::fmt::Display for ServerError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
+/// Executes one typed external emission with a captured configuration snapshot.
+pub fn execute(configuration: &Configuration, herdr: &Herdr) -> ExternalOutcome {
+    let Some(runtime) = Runtime::from_configuration(configuration) else {
+        return ExternalOutcome::Uncertain;
+    };
+    match &herdr.verb {
+        Verb::PaneList => execute_list(&runtime, &herdr.session),
+        verb => {
+            let invocation = invocation(&herdr.session, verb, &runtime);
+            let Some(captured) = run_invocation(&runtime, &invocation) else {
+                return ExternalOutcome::Uncertain;
+            };
+            decode(&invocation.decoder, captured, &herdr.session)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Runtime {
+    executable: PathBuf,
+    polling: Duration,
+    call_timeout: Duration,
+    start_timeout: Duration,
+    output_limit: usize,
+}
+
+impl Runtime {
+    fn from_configuration(configuration: &Configuration) -> Option<Self> {
+        let polling = positive_duration(configuration.polling_milliseconds.0)?;
+        let call_timeout = positive_duration(configuration.call_timeout_milliseconds.0)?;
+        let start_timeout = positive_duration(configuration.start_timeout_milliseconds.0)?;
+        let output_limit = usize::try_from(configuration.external_output_limit_bytes.0).ok()?;
+        let frame = usize::try_from(configuration.frame_capacity_bytes.0).ok()?;
+        if configuration.herdr_executable.0.is_empty()
+            || output_limit == 0
+            || !(1..=MAXIMUM_SIGNAL_BYTES).contains(&frame)
+        {
+            return None;
+        }
+        Some(Self {
+            executable: PathBuf::from(&configuration.herdr_executable.0),
+            polling,
+            call_timeout,
+            start_timeout,
+            output_limit,
+        })
+    }
+}
+
+fn positive_duration(milliseconds: i64) -> Option<Duration> {
+    let milliseconds = u64::try_from(milliseconds).ok()?;
+    (milliseconds != 0).then(|| Duration::from_millis(milliseconds))
+}
+
+fn frame_capacity(configuration: &Configuration) -> Option<FrameCapacity> {
+    let capacity = usize::try_from(configuration.frame_capacity_bytes.0).ok()?;
+    (1..=MAXIMUM_SIGNAL_BYTES)
+        .contains(&capacity)
+        .then(|| FrameCapacity::from(capacity))
+}
+
+struct Invocation {
+    arguments: Vec<OsString>,
+    timeout: Duration,
+    decoder: Decoder,
+}
+
+enum Decoder {
+    WorkspaceCreate,
+    AgentStart {
+        pane_id: String,
+        name: String,
+        kind: &'static str,
+    },
+    AgentPrompt {
+        pane_id: String,
+    },
+    Keys,
+    PaneClose,
+    PaneList,
+    AgentList,
+}
+
+fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Invocation {
+    let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
+    let (specific, timeout, decoder) = match verb {
+        Verb::WorkspaceCreate(data) => {
+            let mut values = vec![
+                OsString::from("workspace"),
+                OsString::from("create"),
+                OsString::from("--cwd"),
+                OsString::from(&data.root.0),
+            ];
+            for variable in &data.variable_vector {
+                values.push(OsString::from("--env"));
+                values.push(OsString::from(format!(
+                    "{}={}",
+                    variable.name.0, variable.value.0
+                )));
+            }
+            (values, runtime.call_timeout, Decoder::WorkspaceCreate)
+        }
+        Verb::AgentStart(data) => {
+            let kind = agent_kind(&data.command.agent_kind);
+            let mut values = vec![
+                OsString::from("agent"),
+                OsString::from("start"),
+                OsString::from(&data.command.agent_name.0),
+                OsString::from("--kind"),
+                OsString::from(kind),
+                OsString::from("--pane"),
+                OsString::from(&data.pane_id.0),
+            ];
+            if let Executable::Explicit(program) = &data.command.executable {
+                values.push(OsString::from("--executable"));
+                values.push(OsString::from(&program.0));
+            }
+            values.push(OsString::from("--timeout"));
+            values.push(OsString::from(
+                runtime.start_timeout.as_millis().to_string(),
+            ));
+            if !data.command.string_vector.is_empty() {
+                values.push(OsString::from("--"));
+                values.extend(data.command.string_vector.iter().map(OsString::from));
+            }
+            (
+                values,
+                runtime.start_timeout,
+                Decoder::AgentStart {
+                    pane_id: data.pane_id.0.clone(),
+                    name: data.command.agent_name.0.clone(),
+                    kind,
+                },
+            )
+        }
+        Verb::AgentPrompt(data) => (
+            vec![
+                OsString::from("agent"),
+                OsString::from("prompt"),
+                OsString::from(&data.pane_id.0),
+                OsString::from(&data.text.0),
+            ],
+            runtime.call_timeout,
+            Decoder::AgentPrompt {
+                pane_id: data.pane_id.0.clone(),
+            },
+        ),
+        Verb::Keys(data) => {
+            let mut values = vec![
+                OsString::from("pane"),
+                OsString::from("send-keys"),
+                OsString::from(&data.pane_id.0),
+            ];
+            values.extend(data.keys.0.iter().map(OsString::from));
+            (values, runtime.call_timeout, Decoder::Keys)
+        }
+        Verb::PaneClose(pane_id) => (
+            vec![
+                OsString::from("pane"),
+                OsString::from("close"),
+                OsString::from(&pane_id.0),
+            ],
+            runtime.call_timeout,
+            Decoder::PaneClose,
+        ),
+        Verb::PaneList => unreachable!("list has a complete-snapshot path"),
+    };
+    arguments.extend(specific);
+    Invocation {
+        arguments,
+        timeout,
+        decoder,
+    }
+}
+
+fn list_invocation(session: &Session, runtime: &Runtime, agent: bool) -> Invocation {
+    let noun = if agent { "agent" } else { "pane" };
+    Invocation {
+        arguments: vec![
+            OsString::from("--session"),
+            OsString::from(&session.0),
+            OsString::from(noun),
+            OsString::from("list"),
+        ],
+        timeout: runtime.call_timeout,
+        decoder: if agent {
+            Decoder::AgentList
+        } else {
+            Decoder::PaneList
+        },
+    }
+}
+
+fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured> {
+    let deadline = Instant::now().checked_add(invocation.timeout)?;
+    runner::run(
+        &runtime.executable,
+        &invocation.arguments,
+        deadline,
+        runtime.polling,
+        runtime.output_limit,
+    )
+    .ok()
+}
+
+fn execute_list(runtime: &Runtime, session: &Session) -> ExternalOutcome {
+    let panes_invocation = list_invocation(session, runtime, false);
+    let Some(panes) = run_invocation(runtime, &panes_invocation) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if !panes.status.success() {
+        return refusal_or_uncertain(&panes);
+    }
+    let agents_invocation = list_invocation(session, runtime, true);
+    let Some(agents) = run_invocation(runtime, &agents_invocation) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if !agents.status.success() {
+        return refusal_or_uncertain(&agents);
+    }
+    decode_complete_snapshot(&panes.stdout, &agents.stdout, session)
+}
+
+fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalOutcome {
+    if !captured.status.success() {
+        return refusal_or_uncertain(&captured);
+    }
+    match decoder {
+        Decoder::WorkspaceCreate => decode_workspace(&captured.stdout, session),
+        Decoder::AgentStart {
+            pane_id,
+            name,
+            kind,
+        } => decode_start(&captured.stdout, pane_id, name, kind),
+        Decoder::AgentPrompt { pane_id } => decode_prompt(&captured.stdout, pane_id),
+        // Herdr's send-keys CLI deliberately emits no success JSON.
+        Decoder::Keys if captured.stdout.is_empty() => ExternalOutcome::Done,
+        Decoder::Keys => decode_ok(&captured.stdout, None),
+        Decoder::PaneClose => decode_ok(&captured.stdout, Some("cli:pane:close")),
+        Decoder::PaneList | Decoder::AgentList => ExternalOutcome::Uncertain,
+    }
+}
+
+fn refusal_or_uncertain(captured: &Captured) -> ExternalOutcome {
+    let envelope = serde_json::from_slice::<ErrorEnvelope>(&captured.stderr)
+        .or_else(|_| serde_json::from_slice::<ErrorEnvelope>(&captured.stdout));
+    let Ok(envelope) = envelope else {
+        return ExternalOutcome::Uncertain;
+    };
+    ExternalOutcome::Refused(Refusal {
+        error_code: ErrorCode(envelope.error.code),
+        exit_status_option: captured
+            .status
+            .code()
+            .map(|code| ExitStatus(i64::from(code))),
+        message: Message(envelope.error.message),
+    })
+}
+
+#[derive(Deserialize)]
+struct Envelope<T> {
+    id: String,
+    result: T,
+}
+
+#[derive(Deserialize)]
+struct ErrorEnvelope {
+    #[allow(dead_code)]
+    id: String,
+    error: ErrorBody,
+}
+
+#[derive(Deserialize)]
+struct ErrorBody {
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Deserialize)]
+struct PaneJson {
+    pane_id: String,
+    terminal_id: String,
+    workspace_id: String,
+    tab_id: String,
+    #[allow(dead_code)]
+    focused: bool,
+    #[allow(dead_code)]
+    agent_status: AgentStatus,
+    #[allow(dead_code)]
+    revision: u64,
+}
+
+#[derive(Clone, Deserialize)]
+struct AgentJson {
+    terminal_id: String,
+    name: Option<String>,
+    agent: Option<String>,
+    agent_status: AgentStatus,
+    workspace_id: String,
+    tab_id: String,
+    pane_id: String,
+    #[allow(dead_code)]
+    focused: bool,
+    #[serde(default)]
+    interactive_ready: bool,
+    #[allow(dead_code)]
+    revision: u64,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AgentStatus {
+    Idle,
+    Working,
+    Blocked,
+    Done,
+    Unknown,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceResult {
+    #[serde(rename = "type")]
+    kind: String,
+    #[allow(dead_code)]
+    workspace: serde_json::Value,
+    #[allow(dead_code)]
+    tab: serde_json::Value,
+    root_pane: PaneJson,
+}
+
+#[derive(Deserialize)]
+struct StartResult {
+    #[serde(rename = "type")]
+    kind: String,
+    agent: AgentJson,
+    #[allow(dead_code)]
+    argv: Vec<String>,
+    #[allow(dead_code)]
+    executable: String,
+}
+
+#[derive(Deserialize)]
+struct PromptResult {
+    #[serde(rename = "type")]
+    kind: String,
+    agent: AgentJson,
+}
+
+#[derive(Deserialize)]
+struct OkResult {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Deserialize)]
+struct PaneListResult {
+    #[serde(rename = "type")]
+    kind: String,
+    panes: Vec<PaneJson>,
+}
+
+#[derive(Deserialize)]
+struct AgentListResult {
+    #[serde(rename = "type")]
+    kind: String,
+    agents: Vec<AgentJson>,
+}
+
+fn decode_workspace(bytes: &[u8], session: &Session) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<WorkspaceResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if envelope.id != "cli:workspace:create" || envelope.result.kind != "workspace_created" {
+        return ExternalOutcome::Uncertain;
+    }
+    ExternalOutcome::Created(Pane {
+        session: session.clone(),
+        pane_id: PaneId(envelope.result.root_pane.pane_id),
+    })
+}
+
+fn decode_start(bytes: &[u8], pane_id: &str, name: &str, kind: &str) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<StartResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    let result = envelope.result;
+    if envelope.id != "cli:agent:start"
+        || result.kind != "agent_started"
+        || result.agent.pane_id != pane_id
+        || result.agent.name.as_deref() != Some(name)
+        || result.agent.agent.as_deref() != Some(kind)
+        || !result.agent.interactive_ready
+    {
+        return ExternalOutcome::Uncertain;
+    }
+    ExternalOutcome::Done
+}
+
+fn decode_prompt(bytes: &[u8], pane_id: &str) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<PromptResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if envelope.id == "cli:agent:prompt"
+        && envelope.result.kind == "agent_prompted"
+        && envelope.result.agent.pane_id == pane_id
+    {
+        ExternalOutcome::Done
+    } else {
+        ExternalOutcome::Uncertain
+    }
+}
+
+fn decode_ok(bytes: &[u8], expected_id: Option<&str>) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<OkResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if envelope.result.kind == "ok" && expected_id.is_none_or(|expected| envelope.id == expected) {
+        ExternalOutcome::Done
+    } else {
+        ExternalOutcome::Uncertain
+    }
+}
+
+fn decode_complete_snapshot(panes: &[u8], agents: &[u8], session: &Session) -> ExternalOutcome {
+    let Ok(pane_envelope) = serde_json::from_slice::<Envelope<PaneListResult>>(panes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    let Ok(agent_envelope) = serde_json::from_slice::<Envelope<AgentListResult>>(agents) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if pane_envelope.id != "cli:pane:list"
+        || pane_envelope.result.kind != "pane_list"
+        || agent_envelope.id != "cli:agent:list"
+        || agent_envelope.result.kind != "agent_list"
+    {
+        return ExternalOutcome::Uncertain;
+    }
+
+    let panes = pane_envelope.result.panes;
+    let mut pane_ids = HashSet::new();
+    for pane in &panes {
+        if !pane_ids.insert(pane.pane_id.as_str()) {
+            return ExternalOutcome::Uncertain;
+        }
+    }
+    let panes_by_id: HashMap<_, _> = panes
+        .iter()
+        .map(|pane| (pane.pane_id.as_str(), pane))
+        .collect();
+    let mut agents_by_id = HashMap::new();
+    for agent in agent_envelope.result.agents {
+        let Some(pane) = panes_by_id.get(agent.pane_id.as_str()) else {
+            return ExternalOutcome::Uncertain;
+        };
+        if agent.terminal_id != pane.terminal_id
+            || agent.workspace_id != pane.workspace_id
+            || agent.tab_id != pane.tab_id
+            || agents_by_id.insert(agent.pane_id.clone(), agent).is_some()
+        {
+            return ExternalOutcome::Uncertain;
+        }
+    }
+
+    ExternalOutcome::Listed(
+        panes
+            .into_iter()
+            .map(|pane| {
+                let state = agents_by_id
+                    .get(&pane.pane_id)
+                    .map(agent_state)
+                    .unwrap_or(State::Open);
+                PaneObservation {
+                    pane: Pane {
+                        session: session.clone(),
+                        pane_id: PaneId(pane.pane_id),
+                    },
+                    state,
+                }
+            })
+            .collect(),
+    )
+}
+
+fn agent_state(agent: &AgentJson) -> State {
+    match agent.agent_status {
+        AgentStatus::Working | AgentStatus::Blocked => State::Busy,
+        AgentStatus::Idle | AgentStatus::Done if agent.interactive_ready => State::Idle,
+        AgentStatus::Idle | AgentStatus::Done | AgentStatus::Unknown => State::Open,
+    }
+}
+
+fn agent_kind(kind: &AgentKind) -> &'static str {
+    match kind {
+        AgentKind::Pi => "pi",
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+        AgentKind::Gemini => "gemini",
+        AgentKind::Cursor => "cursor",
+        AgentKind::Devin => "devin",
+        AgentKind::Agy => "agy",
+        AgentKind::Cline => "cline",
+        AgentKind::Omp => "omp",
+        AgentKind::Mastracode => "mastracode",
+        AgentKind::Opencode => "opencode",
+        AgentKind::Copilot => "copilot",
+        AgentKind::Kimi => "kimi",
+        AgentKind::Kiro => "kiro",
+        AgentKind::Droid => "droid",
+        AgentKind::Amp => "amp",
+        AgentKind::Grok => "grok",
+        AgentKind::Hermes => "hermes",
+        AgentKind::Kilo => "kilo",
+        AgentKind::Qodercli => "qodercli",
+        AgentKind::Qwen => "qwen",
+        AgentKind::Maki => "maki",
+    }
+}
+
+struct OwnedSocket {
+    listener: UnixListener,
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl OwnedSocket {
+    fn bind(path: PathBuf) -> Result<Self, ServerError> {
+        let listener = UnixListener::bind(&path).map_err(ServerError::Io)?;
+        let metadata = fs::metadata(&path).map_err(ServerError::Io)?;
+        Ok(Self {
+            listener,
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+
+impl Drop for OwnedSocket {
+    fn drop(&mut self) {
+        let Ok(metadata) = fs::metadata(&self.path) else {
+            return;
+        };
+        if metadata.dev() == self.device && metadata.ino() == self.inode {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum ServerError {
+    Io(std::io::Error),
+    Frame(shared_translator::FrameError),
+    Signal(String),
+}
+
+impl std::fmt::Display for ServerError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
 impl std::error::Error for ServerError {}
+
 #[cfg(test)]
-mod tests { use super::*; #[test] fn list_object_maps_complete_panes(){let j=br#"{"result":{"type":"pane_list","panes":[{"pane_id":"w:p","interactive_ready":true}]}}"#; match parse_success(j,"list",None,signal_herdr_nexus::Session("s".into())){ExternalOutcome::Listed(v)=>assert_eq!(v.len(),1),x=>panic!("unexpected {x:?}")} } #[test] fn list_partial_is_uncertain(){let j=br#"{"result":{"type":"pane_list"}}"#; assert!(matches!(parse_success(j,"list",None,signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain));} #[test] fn prompt_wrong_result_not_done(){let j=br#"{"result":{"type":"other"}}"#; assert!(matches!(parse_success(j,"prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain));} }
-#[cfg(test)]
-mod readiness_tests { use super::*; #[test] fn readiness_states_require_positive_field(){let s=signal_herdr_nexus::Session("s".into()); let ready=br#"{"result":{"panes":[{"pane_id":"p","interactive_ready":true}]}}"#; match parse_success(ready,"list",None,s){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Idle),_=>panic!()} let s=signal_herdr_nexus::Session("s".into()); let unknown=br#"{"result":{"panes":[{"pane_id":"p"}]}}"#; match parse_success(unknown,"list",None,s){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Open),_=>panic!()} } }
-#[cfg(test)] mod missing_agent_tests { use super::*; #[test] fn unstarted_pane_is_open(){let p=br#"{"result":{"type":"pane_list","panes":[{"pane_id":"p"}]}}"#;let a=br#"{"result":{"type":"agent_list","agents":[]}}"#;match parse_list_join(p,a,signal_herdr_nexus::Session("s".into())){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Open),_=>panic!()}}}
-#[cfg(test)] mod listener_tests { use super::*; #[test] fn malformed_frame_does_not_poison_following_decode(){assert!(matches!(parse_success(b"bad","prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain)); let good=br#"{"result":{"type":"agent_prompted"}}"#; assert!(matches!(parse_success(good,"prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Done));}}
+mod tests {
+    use super::*;
+
+    fn pane(id: &str, status: &str) -> String {
+        format!(
+            r#"{{"pane_id":"{id}","terminal_id":"t-{id}","workspace_id":"w","tab_id":"tab","focused":false,"agent_status":"{status}","revision":1}}"#
+        )
+    }
+
+    fn agent(id: &str, status: &str, ready: bool) -> String {
+        format!(
+            r#"{{"pane_id":"{id}","terminal_id":"t-{id}","workspace_id":"w","tab_id":"tab","focused":false,"agent_status":"{status}","interactive_ready":{ready},"revision":1}}"#
+        )
+    }
+
+    #[test]
+    fn complete_snapshot_maps_readiness_and_missing_agent() {
+        let panes = format!(
+            r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{},{},{}]}}}}"#,
+            pane("idle", "idle"),
+            pane("blocked", "blocked"),
+            pane("plain", "unknown")
+        );
+        let agents = format!(
+            r#"{{"id":"cli:agent:list","result":{{"type":"agent_list","agents":[{},{}]}}}}"#,
+            agent("idle", "idle", true),
+            agent("blocked", "blocked", false)
+        );
+        let ExternalOutcome::Listed(observed) =
+            decode_complete_snapshot(panes.as_bytes(), agents.as_bytes(), &Session("main".into()))
+        else {
+            panic!("complete snapshot expected");
+        };
+        let states: HashMap<_, _> = observed
+            .into_iter()
+            .map(|item| (item.pane.pane_id.0, item.state))
+            .collect();
+        assert_eq!(states["idle"], State::Idle);
+        assert_eq!(states["blocked"], State::Busy);
+        assert_eq!(states["plain"], State::Open);
+    }
+
+    #[test]
+    fn duplicate_or_orphaned_snapshot_entries_are_uncertain() {
+        let one = pane("p", "unknown");
+        let duplicate = format!(
+            r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{one},{one}]}}}}"#
+        );
+        let empty_agents = br#"{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}"#;
+        assert!(matches!(
+            decode_complete_snapshot(duplicate.as_bytes(), empty_agents, &Session("main".into())),
+            ExternalOutcome::Uncertain
+        ));
+
+        let panes =
+            format!(r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{one}]}}}}"#);
+        let agents = format!(
+            r#"{{"id":"cli:agent:list","result":{{"type":"agent_list","agents":[{}]}}}}"#,
+            agent("other", "idle", true)
+        );
+        assert!(matches!(
+            decode_complete_snapshot(panes.as_bytes(), agents.as_bytes(), &Session("main".into())),
+            ExternalOutcome::Uncertain
+        ));
+    }
+
+    #[test]
+    fn unknown_status_is_uncertain() {
+        let panes = format!(
+            r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{}]}}}}"#,
+            pane("p", "impossible")
+        );
+        let agents = br#"{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}"#;
+        assert!(matches!(
+            decode_complete_snapshot(panes.as_bytes(), agents, &Session("main".into())),
+            ExternalOutcome::Uncertain
+        ));
+    }
+
+    #[test]
+    fn occupied_socket_is_preserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-translator-socket-{}-{}",
+            std::process::id(),
+            Instant::now().elapsed().as_nanos()
+        ));
+        fs::create_dir(&directory).expect("temporary directory");
+        let path = directory.join(SOCKET_NAME);
+        let first = OwnedSocket::bind(path.clone()).expect("first bind");
+        assert!(OwnedSocket::bind(path.clone()).is_err());
+        assert!(path.exists());
+        drop(first);
+        assert!(!path.exists());
+        fs::remove_dir(directory).expect("remove temporary directory");
+    }
+}
