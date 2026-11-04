@@ -47,4 +47,3 @@ required-features = ["text"]
 name = "herdr-nexus-place"
 path = "src/bin/herdr-nexus-place.rs"
 required-features = ["text"]
-nix = { version = "0.30", features = ["fs", "process", "signal"] }

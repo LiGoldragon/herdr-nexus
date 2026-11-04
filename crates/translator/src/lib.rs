@@ -1,5 +1,7 @@
 //! Typed external herdr command vocabulary. Signal/socket attachment is kept
 //! separate until generated herdr contracts land.
+pub mod runner;
+
 use serde::{Deserialize, Serialize};
 use std::{fmt, path::PathBuf};
 
