@@ -124,10 +124,16 @@ process_starttime() {
 wait_exact_exit() {
   local pid=$1 expected_starttime=$2 record state actual_starttime
   for _ in $(seq 1 300); do
-    record=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+    if ! record=$(cat "/proc/$pid/stat" 2>/dev/null); then
+      echo "EXACT_PROCESS_REAPED pid=$pid starttime=$expected_starttime"
+      return 0
+    fi
     state=$(awk '{ print $3 }' <<<"$record")
     actual_starttime=$(awk '{ print $22 }' <<<"$record")
-    [[ $state == Z || $actual_starttime != "$expected_starttime" ]] && return 0
+    if [[ $actual_starttime != "$expected_starttime" ]]; then
+      echo "EXACT_PROCESS_IDENTITY_REUSED pid=$pid prior_starttime=$expected_starttime current_starttime=$actual_starttime"
+      return 0
+    fi
     sleep .02
   done
   echo "exact process $pid starttime=$expected_starttime did not exit" >&2
