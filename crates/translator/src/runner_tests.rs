@@ -1,20 +1,28 @@
-use herdr_nexus_translator::runner::{run, RunError};
+use crate::runner::{run_with_environment, Captured, CommandEnvironment, RunError};
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
+fn environment() -> CommandEnvironment {
+    CommandEnvironment {
+        configuration_home: OsString::from("/tmp/herdr-runner-test-config"),
+        state_home: OsString::from("/tmp/herdr-runner-test-state"),
+    }
+}
+
 fn shell(
     script: &str,
     timeout: Duration,
     limit: usize,
-) -> Result<herdr_nexus_translator::runner::Captured, RunError> {
-    run(
+) -> Result<Captured, RunError> {
+    run_with_environment(
         Path::new("/bin/sh"),
         &[OsString::from("-c"), OsString::from(script)],
         Instant::now().checked_add(timeout).expect("test deadline"),
         limit,
+        &environment(),
     )
 }
 
@@ -59,11 +67,12 @@ fn deadline_kills_group_with_background_child_holding_pipes() {
 
 #[test]
 fn spawn_failure_is_typed() {
-    let result = run(
+    let result = run_with_environment(
         Path::new("/definitely/not/a/program"),
         &[],
         Instant::now() + Duration::from_secs(1),
         1,
+        &environment(),
     );
     assert!(matches!(result, Err(RunError::Spawn(_))));
 }

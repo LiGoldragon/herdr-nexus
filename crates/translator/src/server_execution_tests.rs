@@ -2,7 +2,8 @@ use emission_herdr_nexus::{
     AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data, Verb,
     WorkspaceCreate_Data,
 };
-use herdr_nexus_translator::server::{execute, Runtime};
+use crate::server::{execute, Runtime};
+use crate::runner::CommandEnvironment;
 use emission_herdr_nexus::Timeout;
 use signal_herdr_nexus::{
     AgentKind, AgentName, Command, Executable, Keys, Name, PaneId, Program, Root, Session, State,
@@ -56,11 +57,23 @@ impl Fixture {
     }
 
     fn runtime(&self) -> Runtime {
-        Runtime::new(
+        Runtime::test(
             self.executable.clone(),
             std::time::Duration::from_millis(5_000),
             64 * 1024,
+            self.environment(),
         ).expect("valid runtime fixture")
+    }
+
+    fn environment(&self) -> CommandEnvironment {
+        let configuration_home = self.directory.join("config");
+        let state_home = self.directory.join("state");
+        fs::create_dir_all(&configuration_home).expect("configuration fixture");
+        fs::create_dir_all(&state_home).expect("state fixture");
+        CommandEnvironment {
+            configuration_home: configuration_home.into_os_string(),
+            state_home: state_home.into_os_string(),
+        }
     }
 
     fn arguments(&self) -> Vec<String> {
@@ -279,10 +292,11 @@ fn start_execution_owns_its_timeout_instead_of_generic_call_timeout() {
         r#"sleep 0.08
 printf '%s\n' '{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"terminal_id":"t","name":"probe","agent":"codex","agent_status":"idle","workspace_id":"w","tab_id":"tab","pane_id":"w:p","focused":true,"interactive_ready":true,"revision":2},"argv":["codex"]}}'"#,
     );
-    let runtime = Runtime::new(
+    let runtime = Runtime::test(
         fixture.executable.clone(),
         std::time::Duration::from_millis(10),
         64 * 1024,
+        fixture.environment(),
     )
     .expect("runtime");
     let command = Command {

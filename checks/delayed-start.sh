@@ -2,6 +2,7 @@
 set -euo pipefail
 
 package=${1:?package}
+backend=${2:?backend executable}
 base=$(mktemp -d)
 pair=
 cleanup() {
@@ -20,24 +21,6 @@ workspace=$base/workspace
 mkdir -p "$directory" "$state" "$workspace"
 place="{ one $directory $state }"
 
-{
-printf '#!%s\n' "$(command -v bash)"
-cat <<'EOF'
-set -euo pipefail
-case "$3:$4" in
-  workspace:create)
-    printf '%s\n' '{"id":"cli:workspace:create","result":{"type":"workspace_created","workspace":{},"tab":{},"root_pane":{"pane_id":"w:p","terminal_id":"t","workspace_id":"w","tab_id":"tab","focused":true,"agent_status":"unknown","revision":1}}}'
-    ;;
-  agent:start)
-    sleep .20
-    printf '%s\n' '{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"terminal_id":"t","name":"probe","agent":"codex","agent_status":"idle","workspace_id":"w","tab_id":"tab","pane_id":"w:p","focused":true,"interactive_ready":true,"revision":2},"argv":["codex"]}}'
-    ;;
-  *) exit 19 ;;
-esac
-EOF
-} >"$base/herdr-fixture"
-chmod +x "$base/herdr-fixture"
-
 "$package/bin/herdr-pair" "$place" >"$base/pair.log" 2>&1 &
 pair=$!
 for _ in $(seq 1 100); do
@@ -49,7 +32,8 @@ done
 
 meta="$package/bin/herdr-nexus-meta"
 public="$package/bin/herdr-nexus"
-"$meta" one "Configure.HerdrPath.$base/herdr-fixture" >/dev/null
+"$meta" one 'Configure.HerdrPath./bin/false' | grep -q ConfigureRefused
+"$meta" one "Configure.HerdrPath.$backend" >/dev/null
 "$meta" one 'Configure.CallTimeout.50' >/dev/null
 "$meta" one 'Configure.OutputLimit.1048576' >/dev/null
 "$meta" one 'Configure.TextBudget.{ 1048576 64 }' >/dev/null

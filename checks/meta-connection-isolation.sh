@@ -2,7 +2,8 @@
 set -euo pipefail
 
 package=${1:?package}
-base=$(mktemp -d)
+backend=${2:?backend executable}
+base=$(mktemp -d /tmp/hmi.XXXXXX)
 pair_pid=
 
 cleanup() {
@@ -25,8 +26,10 @@ for _ in $(seq 1 200); do
   [[ -S $directory/herdr-meta.sock && -S $directory/herdr-meta-translator.sock ]] && break
   sleep .02
 done
-[[ -S $directory/herdr-meta.sock ]]
-[[ -S $directory/herdr-meta-translator.sock ]]
+if [[ ! -S $directory/herdr-meta.sock || ! -S $directory/herdr-meta-translator.sock ]]; then
+  cat "$base/pair.log" >&2
+  exit 1
+fi
 
 # A client which is not the captured translator is one failed connection, not
 # a failed privileged listener or pair.
@@ -62,7 +65,7 @@ PY
   | grep -q Configured
 
 "$package/bin/herdr-nexus-meta" one \
-  "Configure.HerdrPath.$package/bin/herdr-nexus" | grep -q Configured
+  "Configure.HerdrPath.$backend" | grep -q Configured
 "$package/bin/herdr-nexus-meta" one 'Configure.CallTimeout.1000' | grep -q Configured
 "$package/bin/herdr-nexus-meta" one 'Configure.OutputLimit.1048576' | grep -q Configured
 "$package/bin/herdr-nexus-meta" one 'Configure.TextBudget.{ 1048576 64 }' | grep -q Ready

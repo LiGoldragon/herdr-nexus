@@ -14,6 +14,7 @@ use signal_herdr_nexus::{
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -50,11 +51,33 @@ pub fn run(
     let bootstrap_budget = validated_budget(&bootstrap.budget_value)
         .ok_or_else(|| ServerError::Signal("invalid bootstrap text budget".into()))?;
     let bootstrap_meta = BootstrapMeta { admission, text_budget: bootstrap_budget };
+    let expected = fs::canonicalize(&bootstrap.expected_herdr_executable.0.0)
+        .map_err(ServerError::Io)?;
+    let roots = BackendRootAuthority::validate(&bootstrap.backend_roots)
+        .map_err(ServerError::Signal)?;
+    let configuration = std::sync::Arc::new(TranslatorConfiguration::paired(
+        expected,
+        roots,
+    ));
+    let publication_channel = herdr_nexus_wire::publication::InheritedChannel::validate(
+        &bootstrap.publication_channel,
+        admission.deadline,
+    )
+    .map_err(ServerError::Signal)?;
     let names = herdr_nexus_wire::socket_names();
     let runtime = shared_translator::placement::runtime_path(place);
     let public = OwnedSocket::bind(runtime.join(names.public_translator_socket.0))?;
+    publication_channel.publish(
+        herdr_nexus_wire::transport_types::Listener::PublicTranslator,
+        public.identity().map_err(ServerError::Signal)?,
+    )
+    .map_err(ServerError::Signal)?;
     let meta = OwnedSocket::bind(runtime.join(names.meta_translator_socket.0))?;
-    let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
+    publication_channel.publish(
+        herdr_nexus_wire::transport_types::Listener::MetaTranslator,
+        meta.identity().map_err(ServerError::Signal)?,
+    )
+    .map_err(ServerError::Signal)?;
     let nexus_peer = std::sync::Arc::new(
         NexusPeer::capture(bootstrap.peer_identity.clone()).map_err(ServerError::Io)?
     );
@@ -324,9 +347,64 @@ fn write_failed_frame(
     .map_err(ServerError::Transport)
 }
 
-#[derive(Default)]
+#[derive(Debug)]
+struct BackendRootAuthority {
+    _configuration_home: OwnedFd,
+    _state_home: OwnedFd,
+    command: runner::CommandEnvironment,
+}
+
+impl BackendRootAuthority {
+    fn validate(roots: &herdr_nexus_wire::transport_types::BackendRoots) -> Result<Self, String> {
+        use herdr_nexus_wire::transport_types::InheritedDirectory;
+        fn retain(value: &InheritedDirectory, name: &str) -> Result<OwnedFd, String> {
+            let raw = i32::try_from(value.directory_descriptor.0)
+                .ok()
+                .filter(|descriptor| *descriptor >= 0)
+                .ok_or_else(|| format!("{name} descriptor is outside the native range"))?;
+            // The descriptor is inherited from the paired parent.  Duplication
+            // retains that same open directory description; no path is opened.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(raw) };
+            let retained = rustix::io::fcntl_dupfd_cloexec(borrowed, 3)
+                .map_err(|error| format!("{name} descriptor is not open: {error}"))?;
+            let stat = rustix::fs::fstat(&retained)
+                .map_err(|error| format!("inspect {name} descriptor: {error}"))?;
+            if !rustix::fs::FileType::from_raw_mode(stat.st_mode).is_dir() {
+                return Err(format!("{name} descriptor is not a directory"));
+            }
+            let expected_device = u64::try_from(value.directory_identity.device_id.0)
+                .map_err(|_| format!("{name} device id is negative"))?;
+            let expected_inode = u64::try_from(value.directory_identity.inode_id.0)
+                .map_err(|_| format!("{name} inode id is negative"))?;
+            let observed_device = u64::try_from(stat.st_dev)
+                .map_err(|_| format!("{name} device id is not representable"))?;
+            let observed_inode = u64::try_from(stat.st_ino)
+                .map_err(|_| format!("{name} inode id is not representable"))?;
+            if observed_device != expected_device || observed_inode != expected_inode {
+                return Err(format!("{name} directory identity mismatch"));
+            }
+            rustix::io::fcntl_setfd(&retained, rustix::io::FdFlags::empty())
+                .map_err(|error| format!("inherit retained {name}: {error}"))?;
+            Ok(retained)
+        }
+
+        let configuration_home = retain(&roots.configuration_home.0, "configuration home")?;
+        let state_home = retain(&roots.backend_state_home.0, "backend state home")?;
+        let command = runner::CommandEnvironment {
+            configuration_home: OsString::from(format!(
+                "/proc/self/fd/{}",
+                configuration_home.as_raw_fd()
+            )),
+            state_home: OsString::from(format!("/proc/self/fd/{}", state_home.as_raw_fd())),
+        };
+        Ok(Self { _configuration_home: configuration_home, _state_home: state_home, command })
+    }
+}
+
 pub struct TranslatorConfiguration {
     partial: std::sync::RwLock<PartialTranslatorConfiguration>,
+    expected_executable: PathBuf,
+    roots: BackendRootAuthority,
 }
 
 #[derive(Clone, Default)]
@@ -349,11 +427,17 @@ struct ReadyTranslatorConfiguration {
     call_timeout: Duration,
     output_limit: usize,
     text_budget: (usize, usize),
+    environment: runner::CommandEnvironment,
 }
 
 impl ReadyTranslatorConfiguration {
     fn runtime(&self) -> Runtime {
-        Runtime::new(self.executable.clone(), self.call_timeout, self.output_limit)
+        Runtime::from_validated_authority(
+            self.executable.clone(),
+            self.call_timeout,
+            self.output_limit,
+            self.environment.clone(),
+        )
             .expect("ready translator configuration was validated before publication")
     }
 
@@ -364,6 +448,14 @@ impl ReadyTranslatorConfiguration {
 }
 
 impl TranslatorConfiguration {
+    fn paired(executable: PathBuf, roots: BackendRootAuthority) -> Self {
+        Self {
+            partial: std::sync::RwLock::new(PartialTranslatorConfiguration::default()),
+            expected_executable: executable,
+            roots,
+        }
+    }
+
     fn ready(&self) -> Option<ReadyTranslatorConfiguration> {
         let partial = self.partial.read().ok()?.clone();
         let ready = ReadyTranslatorConfiguration {
@@ -371,8 +463,14 @@ impl TranslatorConfiguration {
             call_timeout: partial.call_timeout?,
             output_limit: partial.output_limit?,
             text_budget: partial.text_budget?,
+            environment: self.roots.command.clone(),
         };
-        Runtime::new(ready.executable.clone(), ready.call_timeout, ready.output_limit)?;
+        Runtime::from_validated_authority(
+            ready.executable.clone(),
+            ready.call_timeout,
+            ready.output_limit,
+            ready.environment.clone(),
+        )?;
         Some(ready)
     }
 
@@ -387,8 +485,13 @@ impl TranslatorConfiguration {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let invalid = match setting {
             Set::HerdrPath(value) if Path::new(&value.0).is_absolute() => {
-                partial.executable = Some(PathBuf::from(value.0));
-                None
+                match fs::canonicalize(&value.0) {
+                    Ok(candidate) if candidate == self.expected_executable => {
+                        partial.executable = Some(candidate);
+                        None
+                    }
+                    _ => Some(SettingName::HerdrPath),
+                }
             }
             Set::CallTimeout(value) => positive_duration(value.0)
                 .map(|value| {
@@ -823,7 +926,7 @@ fn invalid_setting(
 }
 
 /// Executes one typed external emission with a captured configuration snapshot.
-pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
+pub(crate) fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
     match &herdr.verb {
         Verb::WorkspaceCreate(command) => execute_command(runtime, &herdr.session, command),
         Verb::WorkspaceList => execute_command(runtime, &herdr.session, &ListArgument::Workspace),
@@ -841,14 +944,20 @@ pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
 }
 
 #[derive(Clone)]
-pub struct Runtime {
+pub(crate) struct Runtime {
     pub executable: PathBuf,
     pub call_timeout: Duration,
     pub output_limit: usize,
+    environment: runner::CommandEnvironment,
 }
 
 impl Runtime {
-    pub fn new(executable: PathBuf, call_timeout: Duration, output_limit: usize) -> Option<Self> {
+    fn from_validated_authority(
+        executable: PathBuf,
+        call_timeout: Duration,
+        output_limit: usize,
+        environment: runner::CommandEnvironment,
+    ) -> Option<Self> {
         if executable.as_os_str().is_empty() || call_timeout.is_zero() || output_limit == 0 {
             return None;
         }
@@ -856,7 +965,18 @@ impl Runtime {
             executable,
             call_timeout,
             output_limit,
+            environment,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test(
+        executable: PathBuf,
+        call_timeout: Duration,
+        output_limit: usize,
+        environment: runner::CommandEnvironment,
+    ) -> Option<Self> {
+        Self::from_validated_authority(executable, call_timeout, output_limit, environment)
     }
 }
 
@@ -969,7 +1089,13 @@ fn execute_command<T: ExternalCommand>(runtime: &Runtime, session: &Session, com
     };
     let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
     arguments.extend(command.arguments().into_iter().map(OsString::from));
-    let captured = match runner::run(&runtime.executable, &arguments, deadline, runtime.output_limit) {
+    let captured = match runner::run_with_environment(
+        &runtime.executable,
+        &arguments,
+        deadline,
+        runtime.output_limit,
+        &runtime.environment,
+    ) {
         Ok(captured) => captured,
         Err(error) => {
             eprintln!("herdr client execution failed: {error}");
@@ -1377,6 +1503,17 @@ impl OwnedSocket {
             inode: metadata.ino(),
         })
     }
+
+    fn identity(&self) -> Result<herdr_nexus_wire::transport_types::SocketIdentity, String> {
+        Ok(herdr_nexus_wire::transport_types::SocketIdentity {
+            device_id: herdr_nexus_wire::transport_types::DeviceId(
+                i64::try_from(self.device).map_err(|_| "listener device exceeds Integer")?,
+            ),
+            inode_id: herdr_nexus_wire::transport_types::InodeId(
+                i64::try_from(self.inode).map_err(|_| "listener inode exceeds Integer")?,
+            ),
+        })
+    }
 }
 
 impl Drop for OwnedSocket {
@@ -1409,6 +1546,130 @@ impl std::error::Error for ServerError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_executable() -> PathBuf {
+        fs::canonicalize(std::env::current_exe().expect("current test executable"))
+            .expect("canonical test executable")
+    }
+
+    #[test]
+    fn owned_socket_removes_only_its_exact_socket_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-owned-translator-socket-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("listener.sock");
+        let retained = directory.join("retained.sock");
+        let owned = OwnedSocket::bind(path.clone()).expect("owned socket");
+        fs::rename(&path, &retained).expect("move owned socket pathname");
+        let rival = UnixListener::bind(&path).expect("replacement listener");
+        drop(owned);
+        assert!(path.exists(), "replacement listener survives owned drop");
+        assert!(retained.exists(), "moved owned socket is not rediscovered by pathname");
+        drop(rival);
+        fs::remove_file(path).expect("remove replacement");
+        fs::remove_file(retained).expect("remove retained owned socket");
+        fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
+    fn test_inherited(fd: &OwnedFd) -> herdr_nexus_wire::transport_types::InheritedDirectory {
+        use herdr_nexus_wire::transport_types::*;
+        let stat = rustix::fs::fstat(fd).expect("test directory stat");
+        InheritedDirectory {
+            directory_descriptor: DirectoryDescriptor(i64::from(fd.as_raw_fd())),
+            directory_identity: DirectoryIdentity {
+                device_id: DeviceId(i64::try_from(stat.st_dev).expect("test device id")),
+                inode_id: InodeId(i64::try_from(stat.st_ino).expect("test inode id")),
+            },
+        }
+    }
+
+    fn test_configuration() -> TranslatorConfiguration {
+        use herdr_nexus_wire::transport_types::*;
+        let configuration = rustix::fs::open(
+            "/tmp",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("test configuration directory");
+        let state = rustix::fs::open(
+            "/tmp",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .expect("test state directory");
+        let roots = BackendRootAuthority::validate(&BackendRoots {
+            configuration_home: ConfigurationHome(test_inherited(&configuration)),
+            backend_state_home: BackendStateHome(test_inherited(&state)),
+        })
+        .expect("test backend roots");
+        TranslatorConfiguration::paired(
+            test_executable(),
+            roots,
+        )
+    }
+
+    #[test]
+    fn inherited_backend_roots_validate_open_directory_identity() {
+        use herdr_nexus_wire::transport_types::*;
+        let configuration = rustix::fs::open(
+            "/tmp",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let state = rustix::io::fcntl_dupfd_cloexec(&configuration, 3).unwrap();
+        let roots = BackendRoots {
+            configuration_home: ConfigurationHome(test_inherited(&configuration)),
+            backend_state_home: BackendStateHome(test_inherited(&state)),
+        };
+        let authority = BackendRootAuthority::validate(&roots).expect("valid roots");
+        assert!(authority.command.configuration_home.to_string_lossy().starts_with("/proc/self/fd/"));
+        assert!(authority.command.state_home.to_string_lossy().starts_with("/proc/self/fd/"));
+    }
+
+    #[test]
+    fn inherited_backend_roots_refuse_bad_descriptors_types_and_identities() {
+        use herdr_nexus_wire::transport_types::*;
+        let directory = rustix::fs::open(
+            "/tmp",
+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let valid = test_inherited(&directory);
+        let roots = |configuration_home| BackendRoots {
+            configuration_home: ConfigurationHome(configuration_home),
+            backend_state_home: BackendStateHome(valid.clone()),
+        };
+
+        let mut wrong_range = valid.clone();
+        wrong_range.directory_descriptor.0 = i64::MAX;
+        assert!(BackendRootAuthority::validate(&roots(wrong_range)).unwrap_err().contains("native range"));
+        let mut closed = valid.clone();
+        closed.directory_descriptor.0 = 999_999;
+        assert!(BackendRootAuthority::validate(&roots(closed)).unwrap_err().contains("not open"));
+        let mut mismatch = valid.clone();
+        mismatch.directory_identity.inode_id.0 += 1;
+        assert!(BackendRootAuthority::validate(&roots(mismatch)).unwrap_err().contains("identity mismatch"));
+        let mut negative = valid.clone();
+        negative.directory_identity.device_id.0 = -1;
+        assert!(BackendRootAuthority::validate(&roots(negative)).unwrap_err().contains("device id is negative"));
+
+        let fixture = std::env::temp_dir().join(format!("herdr-root-file-{}", std::process::id()));
+        fs::write(&fixture, b"file").unwrap();
+        let file = rustix::fs::open(
+            &fixture,
+            rustix::fs::OFlags::RDONLY,
+            rustix::fs::Mode::empty(),
+        )
+        .unwrap();
+        let not_directory = test_inherited(&file);
+        assert!(BackendRootAuthority::validate(&roots(not_directory)).unwrap_err().contains("not a directory"));
+        fs::remove_file(fixture).unwrap();
+    }
 
     fn meta_request(
         configuration: &TranslatorConfiguration,
@@ -1470,7 +1731,7 @@ mod tests {
         };
         serve_one(
             &mut server,
-            &TranslatorConfiguration::default(),
+            &test_configuration(),
             &place,
             Endpoint::Public,
             herdr_nexus_wire::ValidAdmission {
@@ -1517,7 +1778,7 @@ mod tests {
         expected.live.identity.process_id = ProcessId(i64::from(std::process::id()) + 1);
         serve_one_paired(
             &mut server,
-            &TranslatorConfiguration::default(),
+            &test_configuration(),
             &place,
             Endpoint::Public,
             BootstrapMeta {
@@ -1542,13 +1803,14 @@ mod tests {
     #[test]
     fn malformed_meta_request_is_failed_and_next_valid_set_is_answered() {
         use crate::transport_types::Kind;
-        let configuration = TranslatorConfiguration::default();
+        let configuration = test_configuration();
+        let executable = test_executable();
         let malformed = meta_request(&configuration, "this is not datom");
         assert_eq!(malformed.kind, Kind::Failed);
 
         let query =
             meta_signal_herdr_nexus::Query::Configure(meta_signal_herdr_nexus::Set::HerdrPath(
-                meta_signal_herdr_nexus::PathValue("/usr/bin/herdr".into()),
+                meta_signal_herdr_nexus::PathValue(executable.to_string_lossy().into_owned()),
             ));
         let answered = meta_request(&configuration, &shared_translator::encode(&query));
         assert_eq!(answered.kind, Kind::Answered);
@@ -1559,13 +1821,16 @@ mod tests {
     #[test]
     fn herdr_path_must_be_absolute_and_failed_set_preserves_prior_value() {
         use meta_signal_herdr_nexus::{PathValue, Response, Set};
-        let configuration = TranslatorConfiguration::default();
+        let configuration = test_configuration();
+        let executable = test_executable();
         assert!(matches!(
-            configuration.apply(Set::HerdrPath(PathValue("/usr/bin/herdr".into()))),
+            configuration.apply(Set::HerdrPath(PathValue(executable.to_string_lossy().into_owned()))),
             Response::Configured(_)
         ));
         assert!(matches!(
-            configuration.apply(Set::HerdrPath(PathValue("relative/herdr".into()))),
+            configuration.apply(Set::HerdrPath(PathValue(
+                executable.with_extension("mismatch").to_string_lossy().into_owned()
+            ))),
             Response::ConfigureRefused(_)
         ));
         assert_eq!(
@@ -1575,7 +1840,7 @@ mod tests {
                 .expect("configuration lock")
                 .executable
                 .as_deref(),
-            Some(Path::new("/usr/bin/herdr"))
+            Some(executable.as_path())
         );
     }
 
@@ -1777,8 +2042,10 @@ mod tests {
                 .expect("delayed response");
         });
 
-        let configuration = TranslatorConfiguration::default();
-        let _ = configuration.apply(Set::HerdrPath(PathValue("/bin/true".into())));
+        let configuration = test_configuration();
+        let _ = configuration.apply(Set::HerdrPath(PathValue(
+            test_executable().to_string_lossy().into_owned(),
+        )));
         let _ = configuration.apply(Set::CallTimeout(Timeout(20)));
         let _ = configuration.apply(Set::OutputLimit(ByteLimit(4096)));
         let _ = configuration.apply(Set::TextBudget(BudgetValue {

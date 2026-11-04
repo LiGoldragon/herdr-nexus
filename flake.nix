@@ -9,9 +9,21 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     ethos-zero.url = "github:LiGoldragon/ethos-zero/b8052c2404374265dfcddbde83fef76977f78acd";
+    herdr-source = {
+      url = "path:/nix/store/3jhxk12n1hhjw4a8y4a6fwiqaf37ydp6-source";
+      flake = false;
+    };
+    herdr-patch = {
+      url = "path:/nix/store/kwavh83rncsz0sjqxd7pj6z68f9mi9gx-codex-executable-selection.patch";
+      flake = false;
+    };
+    herdr-zig-cache = {
+      url = "path:/nix/store/q99mxjl4knvj7jkahjfnxbzi1cxzh42v-herdr-libghostty-vt-zig-cache";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero }:
+  outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero, herdr-source, herdr-patch, herdr-zig-cache }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -26,23 +38,77 @@
           src = source;
           cargoExtraArgs = "--workspace --all-features";
         };
-      in {
-        packages = rec {
-        daemon = rust.craneLib.buildPackage {
+        herdrCargoArtifacts = rust.craneLib.buildDepsOnly {
+          pname = "herdr-dependencies";
+          version = "0.8.2";
+          src = herdr-source;
+          nativeBuildInputs = [ pkgs.zig_0_15 ];
+          LIBGHOSTTY_VT_OPTIMIZE = "ReleaseFast";
+          LIBGHOSTTY_VT_SIMD = "true";
+          LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = herdr-zig-cache;
+          preBuild = ''
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+          '';
+        };
+        exactBackendPackage = rust.craneLib.buildPackage {
+          pname = "herdr";
+          version = "0.8.2";
+          src = herdr-source;
+          patches = [ herdr-patch ];
+          cargoArtifacts = herdrCargoArtifacts;
+          doCheck = false;
+          nativeBuildInputs = [ pkgs.zig_0_15 ];
+          LIBGHOSTTY_VT_OPTIMIZE = "ReleaseFast";
+          LIBGHOSTTY_VT_SIMD = "true";
+          LIBGHOSTTY_VT_ZIG_SYSTEM_DIR = herdr-zig-cache;
+          preBuild = ''
+            export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-global-cache"
+            mkdir -p "$ZIG_GLOBAL_CACHE_DIR"
+          '';
+          meta.mainProgram = "herdr";
+        };
+        backendDeploymentModule = { lib, ... }: {
+          options = {
+            package = lib.mkOption { type = lib.types.package; };
+            configurationRoot = lib.mkOption { type = lib.types.listOf lib.types.str; };
+            stateRoot = lib.mkOption { type = lib.types.listOf lib.types.str; };
+            claimName = lib.mkOption { type = lib.types.str; };
+            readinessTimeout = lib.mkOption { type = lib.types.ints.positive; };
+            probeTimeout = lib.mkOption { type = lib.types.ints.positive; };
+            stopTimeout = lib.mkOption { type = lib.types.ints.positive; };
+            pollInterval = lib.mkOption { type = lib.types.ints.positive; };
+            outputLimit = lib.mkOption { type = lib.types.ints.positive; };
+          };
+        };
+        backendDefaults = {
+          package = exactBackendPackage;
+          configurationRoot = [ "herdr-backend" "config" ];
+          stateRoot = [ "herdr-backend" "state" ];
+          claimName = "herdr-backend.owner";
+          readinessTimeout = 30000;
+          probeTimeout = 1000;
+          stopTimeout = 5000;
+          pollInterval = 25;
+          outputLimit = 1048576;
+        };
+        normalComponent = value:
+          value != "." && value != ".." && builtins.match "[A-Za-z0-9._-]+" value != null;
+        daemonPackage = rust.craneLib.buildPackage {
           pname = "herdr-nexus-daemon";
           version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
           cargoExtraArgs = "-p herdr-nexus-daemon --bin herdr-nexus-daemon --no-default-features";
         };
-        translator = rust.craneLib.buildPackage {
+        translatorPackage = rust.craneLib.buildPackage {
           pname = "herdr-translator";
           version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
           cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-translator";
         };
-        cli = rust.craneLib.buildPackage {
+        cliPackage = rust.craneLib.buildPackage {
           pname = "herdr-nexus-cli";
           version = "0.1.0";
           src = source;
@@ -53,16 +119,55 @@
             mv "$out/bin/herdr-pair" "$out/libexec/herdr-pair-launcher"
           '';
         };
-        pair = pkgs.writeShellScriptBin "herdr-pair" ''
-          if [[ $# -ne 1 ]]; then
-            echo "usage: herdr-pair '<Place>'" >&2
-            exit 64
-          fi
-          exec ${cli}/libexec/herdr-pair-launcher "$1" \
-            ${daemon}/bin/herdr-nexus-daemon \
-            ${translator}/bin/herdr-translator \
-            70000 8388608 25 1048576 64
-        '';
+        fakeBackend = pkgs.stdenv.mkDerivation {
+          pname = "herdr-native-fake-backend";
+          version = "0.1.0";
+          dontUnpack = true;
+          buildPhase = ''
+            $CC -std=c11 -Wall -Wextra -Werror \
+              ${./tests/nativefixture/fake-backend.c} -o fake-backend
+          '';
+          installPhase = ''
+            mkdir -p "$out/bin"
+            install -m755 fake-backend "$out/bin/fake-backend"
+          '';
+          meta.mainProgram = "fake-backend";
+        };
+        mkPair = overrides:
+          let
+            deployment = (pkgs.lib.evalModules {
+              modules = [ backendDeploymentModule { config = backendDefaults // overrides; } ];
+            }).config;
+            valid = deployment.configurationRoot != []
+              && deployment.stateRoot != []
+              && builtins.all normalComponent deployment.configurationRoot
+              && builtins.all normalComponent deployment.stateRoot
+              && normalComponent deployment.claimName;
+            vector = values: "[ ${builtins.concatStringsSep " " values} ]";
+            deploymentText = "{ ${pkgs.lib.getExe deployment.package} ${vector deployment.configurationRoot} ${vector deployment.stateRoot} ${deployment.claimName} ${toString deployment.readinessTimeout} ${toString deployment.probeTimeout} ${toString deployment.stopTimeout} ${toString deployment.pollInterval} ${toString deployment.outputLimit} }";
+          in assert valid;
+          pkgs.writeShellScriptBin "herdr-pair" ''
+            if [[ $# -ne 1 ]]; then
+              echo "usage: herdr-pair '<Place>'" >&2
+              exit 64
+            fi
+            exec ${cliPackage}/libexec/herdr-pair-launcher "$1" \
+              '${deploymentText}' \
+              ${daemonPackage}/bin/herdr-nexus-daemon \
+              ${translatorPackage}/bin/herdr-translator \
+              70000 8388608 25 1048576 64
+          '';
+        delayedPairPackage = pkgs.symlinkJoin {
+          name = "herdr-nexus-delayed-start-fixture";
+          paths = [ daemonPackage translatorPackage cliPackage (mkPair { package = fakeBackend; }) ];
+        };
+      in {
+        lib = { inherit mkPair; };
+        packages = rec {
+        daemon = daemonPackage;
+        translator = translatorPackage;
+        cli = cliPackage;
+        pair = mkPair {};
         default = pkgs.symlinkJoin {
           name = "herdr-nexus-v1";
           paths = [ daemon translator cli pair ];
@@ -95,6 +200,11 @@
             generator = ethos-zero.packages.${system}.default;
             declaration = ./ethos/argument.ethos;
             committed = ./crates/translator/src/generated/argument.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
+          backend-deployment-generated = pkgs.runCommand "herdr-backend-deployment-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/backend-deployment.ethos;
+            committed = ./crates/translator/src/generated/backend_deployment.rs;
           } (builtins.readFile ./checks/generated-contract.sh);
           transport-generated = pkgs.runCommand "herdr-transport-generated" {
             generator = ethos-zero.packages.${system}.default;
@@ -133,6 +243,7 @@
           generated = pkgs.runCommand "herdr-generated-contracts" {
             contracts = [
               operation-generated memory-generated emission-generated argument-generated
+              backend-deployment-generated
               transport-generated public-call-generated public-payload-generated
               meta-call-generated meta-payload-generated core-meta-generated
             ];
@@ -148,18 +259,36 @@
             touch "$out"
           '';
           delayed-start = pkgs.runCommand "herdr-delayed-start" {
-            package = self.packages.${system}.default;
+            package = delayedPairPackage;
+            backend = "${fakeBackend}/bin/fake-backend";
             script = ./checks/delayed-start.sh;
           } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
+            ${pkgs.bash}/bin/bash "$script" "$package" "$backend"
             touch "$out"
           '';
           meta-connection-isolation = pkgs.runCommand "herdr-meta-connection-isolation" {
             package = self.packages.${system}.default;
+            backend = pkgs.lib.getExe exactBackendPackage;
             script = ./checks/meta-connection-isolation.sh;
             nativeBuildInputs = [ pkgs.python3 ];
           } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
+            ${pkgs.bash}/bin/bash "$script" "$package" "$backend"
+            touch "$out"
+          '';
+          backend-pair-independent = pkgs.runCommand "herdr-backend-pair-independent" {
+            package = self.packages.${system}.default;
+            fake = "${fakeBackend}/bin/fake-backend";
+            script = ./checks/backend_pair_independent.sh;
+            nativeBuildInputs = [ pkgs.bash pkgs.binutils pkgs.coreutils pkgs.gnugrep pkgs.procps ];
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$package" "$fake"
+            touch "$out"
+          '';
+          backend-runtime = pkgs.runCommand "herdr-backend-runtime" {
+            backend = exactBackendPackage;
+            script = ./checks/backend-runtime.sh;
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$backend/bin/herdr"
             touch "$out"
           '';
         };

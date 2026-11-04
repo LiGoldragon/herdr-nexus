@@ -11,7 +11,7 @@ libc = "0.2"
 herdr-nexus-wire = { path = "../wire" }
 core-meta-herdr-nexus = { path = "../core-meta" }
 nix = { version = "0.30", features = ["fs", "poll", "process", "signal", "socket", "user"] }
-rustix = { version = "1", features = ["process", "rand"] }
+rustix = { version = "1", features = ["fs", "process", "rand"] }
 rkyv = { version = "0.8", features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }

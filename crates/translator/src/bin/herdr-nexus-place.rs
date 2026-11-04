@@ -1,7 +1,10 @@
 use herdr_nexus_translator::maximum_text_budget;
 use herdr_nexus_translator::transport_types::{
     Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds,
+    BackendRoots, BackendStateHome, ConfigurationHome, DeviceId, DirectoryDescriptor,
+    DirectoryIdentity, ExpectedHerdrExecutable, InheritedDirectory, InodeId,
     RetryDelayMilliseconds, TranslatorBootstrap,
+    PublicationChannel, PublicationDescriptor,
 };
 use shared_translator::{PeerIdentity, ProcessId, UserId};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
@@ -27,6 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     herdr_nexus_wire::ValidAdmission::try_from(&admission)
         .map_err(|message| format!("invalid admission: {message}"))?;
+    let publication_channel = PublicationChannel(PublicationDescriptor(integer(
+        arguments.next(),
+        "PUBLICATION_DESCRIPTOR",
+    )?));
     let place = shared_translator::decode::<shared_translator::Place>(
         &place_text,
         &mut maximum_text_budget(),
@@ -40,7 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 arguments.next().ok_or("INSTANCE_ID")?,
             );
             output.write_frame(
-                &CoreBootstrap { place, admission, peer_identity, instance_id }.signalize()?,
+                &CoreBootstrap { place, admission, peer_identity, instance_id, publication_channel }.signalize()?,
                 FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES),
             )?
         },
@@ -49,8 +56,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 node_limit: NodeLimit(integer(arguments.next(), "TEXT_NODE_LIMIT")?),
                 depth_limit: DepthLimit(integer(arguments.next(), "TEXT_DEPTH_LIMIT")?),
             };
+            let expected_herdr_executable = ExpectedHerdrExecutable(
+                meta_signal_herdr_nexus::PathValue(
+                    arguments.next().ok_or("EXPECTED_HERDR_EXECUTABLE")?,
+                ),
+            );
+            let inherited = |descriptor, device, inode| InheritedDirectory {
+                directory_descriptor: DirectoryDescriptor(descriptor),
+                directory_identity: DirectoryIdentity {
+                    device_id: DeviceId(device),
+                    inode_id: InodeId(inode),
+                },
+            };
+            let backend_roots = BackendRoots {
+                configuration_home: ConfigurationHome(inherited(
+                    integer(arguments.next(), "CONFIGURATION_DESCRIPTOR")?,
+                    integer(arguments.next(), "CONFIGURATION_DEVICE_ID")?,
+                    integer(arguments.next(), "CONFIGURATION_INODE_ID")?,
+                )),
+                backend_state_home: BackendStateHome(inherited(
+                    integer(arguments.next(), "STATE_DESCRIPTOR")?,
+                    integer(arguments.next(), "STATE_DEVICE_ID")?,
+                    integer(arguments.next(), "STATE_INODE_ID")?,
+                )),
+            };
             output.write_frame(
-                &TranslatorBootstrap { place, admission, budget_value, peer_identity }.signalize()?,
+                &TranslatorBootstrap {
+                    place,
+                    admission,
+                    budget_value,
+                    peer_identity,
+                    expected_herdr_executable,
+                    backend_roots,
+                    publication_channel,
+                }
+                .signalize()?,
                 FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES),
             )?;
         }

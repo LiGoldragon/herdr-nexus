@@ -1,0 +1,26 @@
+Library
+[]
+[ BackendExecutable.String
+  RootComponent.String
+  ConfigurationRoot.Vector<RootComponent>
+  BackendStateRoot.Vector<RootComponent>
+  ClaimName.RootComponent
+  Milliseconds.Integer
+  Bytes.Integer
+  ReadinessTimeout.Milliseconds
+  ProbeTimeout.Milliseconds
+  StopTimeout.Milliseconds
+  PollInterval.Milliseconds
+  OutputLimit.Bytes
+  BackendDeployment.{
+     BackendExecutable
+     ConfigurationRoot
+     BackendStateRoot
+     ClaimName
+     ReadinessTimeout
+     ProbeTimeout
+     StopTimeout
+     PollInterval
+     OutputLimit } ]
+[]
+[]

@@ -1853,6 +1853,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owned_listener_removes_only_its_exact_socket_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "herdr-owned-listener-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let path = directory.join("listener.sock");
+        let retained = directory.join("retained.sock");
+        let owned = OwnedListener::bind(path.clone()).expect("owned listener");
+        std::fs::rename(&path, &retained).expect("move owned socket pathname");
+        let rival = std::os::unix::net::UnixListener::bind(&path).expect("replacement listener");
+        drop(owned);
+        assert!(path.exists(), "replacement listener survives owned drop");
+        assert!(retained.exists(), "moved owned socket is not rediscovered by pathname");
+        drop(rival);
+        std::fs::remove_file(path).expect("remove replacement");
+        std::fs::remove_file(retained).expect("remove retained owned socket");
+        std::fs::remove_dir(directory).expect("remove fixture directory");
+    }
+
     fn test_configuration() -> Arc<ReadyCoreConfiguration> {
         Arc::new(ReadyCoreConfiguration {
             polling: Duration::from_millis(10),

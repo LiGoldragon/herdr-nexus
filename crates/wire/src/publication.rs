@@ -62,23 +62,28 @@ impl ChildChannel {
     }
 }
 
-pub struct InheritedChannel { descriptor: RawFd, owned: OwnedFd, timeout: Duration }
+pub struct InheritedChannel { descriptor: RawFd, _owned: OwnedFd, timeout: Duration }
 
 impl InheritedChannel {
     pub fn validate(channel: &PublicationChannel, timeout: Duration) -> Result<Self, String> {
         let descriptor = i32::try_from(channel.0.0).ok().filter(|value| *value >= 3)
             .ok_or_else(|| "publication descriptor is outside the inherited range".to_owned())?;
-        nix::sys::socket::getsockname::<nix::sys::socket::UnixAddr>(descriptor)
-            .map_err(|error| format!("publication descriptor is not a Unix socket: {error}"))?;
         let retained = duplicate_inherited_descriptor(descriptor)?;
-        let socket_type = nix::sys::socket::getsockopt(&retained, nix::sys::socket::sockopt::SockType)
-            .map_err(|error| format!("inspect publication descriptor socket type: {error}"))?;
-        if socket_type != nix::sys::socket::SockType::SeqPacket {
-            return Err("publication descriptor is not a Unix sequenced-packet socket".into());
-        }
-        nix::unistd::close(descriptor)
-            .map_err(|error| format!("close inherited publication descriptor: {error}"))?;
-        Ok(Self { descriptor: retained.as_raw_fd(), owned: retained, timeout })
+        let validation = (|| -> Result<(), String> {
+            nix::sys::socket::getsockname::<nix::sys::socket::UnixAddr>(retained.as_raw_fd())
+                .map_err(|error| format!("publication descriptor is not a Unix socket: {error}"))?;
+            let socket_type = nix::sys::socket::getsockopt(&retained, nix::sys::socket::sockopt::SockType)
+                .map_err(|error| format!("inspect publication descriptor socket type: {error}"))?;
+            if socket_type != nix::sys::socket::SockType::SeqPacket {
+                return Err("publication descriptor is not a Unix sequenced-packet socket".into());
+            }
+            Ok(())
+        })();
+        let closed = nix::unistd::close(descriptor)
+            .map_err(|error| format!("close inherited publication descriptor: {error}"));
+        validation?;
+        closed?;
+        Ok(Self { descriptor: retained.as_raw_fd(), _owned: retained, timeout })
     }
 
     pub fn publish(&self, listener: Listener, socket_identity: SocketIdentity) -> Result<(), String> {
@@ -94,12 +99,24 @@ impl InheritedChannel {
 #[allow(unsafe_code)]
 fn duplicate_inherited_descriptor(descriptor: RawFd) -> Result<OwnedFd, String> {
     // The pair parent created this private endpoint, made it inheritable only for this child,
-    // and retains the peer until bootstrap finishes. This runs during single-threaded bootstrap,
-    // before any owner can close or replace the inherited descriptor. The borrow exists only for
-    // the kernel duplication call; the returned OwnedFd is the retained lifetime authority.
-    let inherited = unsafe { std::os::fd::BorrowedFd::borrow_raw(descriptor) };
-    rustix::io::fcntl_dupfd_cloexec(inherited, 3)
-        .map_err(|error| format!("retain publication descriptor: {error}"))
+    // and retains the peer until bootstrap finishes. This function first proves the raw descriptor
+    // open, then duplicates it during single-threaded bootstrap, before any owner can close or replace
+    // it. F_DUPFD_CLOEXEC returns a fresh descriptor owned only by this call. Converting that successful
+    // result into OwnedFd transfers the fresh kernel resource into its sole Rust owner.
+    if unsafe { libc::fcntl(descriptor, libc::F_GETFD) } == -1 {
+        return Err(format!(
+            "publication descriptor is not open: {}",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    let retained = unsafe { libc::fcntl(descriptor, libc::F_DUPFD_CLOEXEC, 3) };
+    if retained == -1 {
+        return Err(format!(
+            "retain publication descriptor: {}",
+            std::io::Error::last_os_error(),
+        ));
+    }
+    Ok(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(retained) })
 }
 
 fn send_signal<T: Signalizable>(descriptor: RawFd, value: &T) -> Result<(), String> {
@@ -112,7 +129,11 @@ fn send_signal<T: Signalizable>(descriptor: RawFd, value: &T) -> Result<(), Stri
     Ok(())
 }
 
-fn receive_signal<T: Restorable>(descriptor: RawFd) -> Result<T, String> {
+fn receive_signal<T>(descriptor: RawFd) -> Result<T, String>
+where
+    T: rkyv::Archive,
+    Signal<T>: Restorable<T>,
+{
     let mut bytes = vec![0_u8; MAXIMUM_PACKET_BYTES];
     let count = nix::sys::socket::recv(descriptor, &mut bytes, nix::sys::socket::MsgFlags::empty())
         .map_err(|error| format!("receive listener publication: {error}"))?;
@@ -121,7 +142,11 @@ fn receive_signal<T: Restorable>(descriptor: RawFd) -> Result<T, String> {
     Signal::<T>::from(bytes).restore().map_err(|error| format!("invalid listener publication: {error:?}"))
 }
 
-fn receive_signal_bounded<T: Restorable>(descriptor: RawFd, timeout: Duration) -> Result<T, String> {
+fn receive_signal_bounded<T>(descriptor: RawFd, timeout: Duration) -> Result<T, String>
+where
+    T: rkyv::Archive,
+    Signal<T>: Restorable<T>,
+{
     let deadline = std::time::Instant::now().checked_add(timeout)
         .ok_or_else(|| "listener publication deadline overflow".to_owned())?;
     loop {
@@ -146,7 +171,7 @@ fn receive_signal_bounded<T: Restorable>(descriptor: RawFd, timeout: Duration) -
 mod tests {
     use super::*;
     use crate::transport_types::{DeviceId, InodeId};
-    use std::os::fd::{AsRawFd, IntoRawFd};
+    use std::os::fd::IntoRawFd;
 
     fn channel_for_owned(descriptor: OwnedFd) -> PublicationChannel {
         PublicationChannel(PublicationDescriptor(i64::from(descriptor.into_raw_fd())))
@@ -174,7 +199,7 @@ mod tests {
         drop(child);
         let error = InheritedChannel::validate(&channel, Duration::from_millis(10))
             .err().expect("closed descriptor must be refused");
-        assert!(error.contains("not a Unix socket"), "{error}");
+        assert!(error.contains("not open"), "{error}");
     }
 
     #[test]
@@ -238,5 +263,33 @@ mod tests {
         let error = inherited.publish(Listener::MetaNexus, identity())
             .expect_err("closed parent must fail publication");
         assert!(error.contains("send listener publication") || error.contains("channel closed"), "{error}");
+    }
+
+    #[test]
+    fn parent_observes_eof_when_child_disappears_before_publication() {
+        let (parent, child) = pair().expect("publication pair");
+        drop(child);
+        let error = parent.receive().expect_err("child disappearance must close publication channel");
+        assert!(error.contains("channel closed"), "{error}");
+    }
+
+    #[test]
+    fn publication_does_not_complete_before_acknowledgement() {
+        let (parent, child) = pair().expect("publication pair");
+        let channel = child.prepare_for_spawn().expect("child descriptor");
+        std::mem::forget(child);
+        let inherited = InheritedChannel::validate(&channel, Duration::from_secs(1))
+            .expect("validated inherited channel");
+        let (finished_sender, finished_receiver) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            let result = inherited.publish(Listener::PublicNexus, identity());
+            finished_sender.send(result).expect("publish result");
+        });
+        parent.receive().expect("publication before acknowledgement");
+        assert!(finished_receiver.try_recv().is_err(), "publication returned before acknowledgement");
+        parent.acknowledge(Listener::PublicNexus).expect("acknowledgement");
+        finished_receiver.recv_timeout(Duration::from_secs(1))
+            .expect("publish completion").expect("successful publication");
+        publisher.join().expect("publisher");
     }
 }

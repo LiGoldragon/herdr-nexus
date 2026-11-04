@@ -26,6 +26,28 @@ pub enum RunError {
     OutputLimit,
 }
 
+#[derive(Clone, Debug)]
+pub struct CommandEnvironment {
+    pub configuration_home: OsString,
+    pub state_home: OsString,
+}
+
+impl CommandEnvironment {
+    fn apply(&self, command: &mut Command) {
+        command
+            .env("XDG_CONFIG_HOME", &self.configuration_home)
+            .env("XDG_STATE_HOME", &self.state_home);
+        for name in [
+            "HERDR_CONFIG_PATH",
+            "HERDR_SOCKET_PATH",
+            "HERDR_CLIENT_SOCKET_PATH",
+            "HERDR_SESSION",
+        ] {
+            command.env_remove(name);
+        }
+    }
+}
+
 impl std::fmt::Display for RunError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "bounded external client failed: {self:?}")
@@ -39,11 +61,12 @@ impl std::error::Error for RunError {}
 /// Output is retained only while the joint stdout/stderr byte count remains
 /// within `output_limit`. Crossing the limit or reaching the deadline kills
 /// and reaps the complete owned group before returning.
-pub fn run(
+pub(crate) fn run_with_environment(
     executable: &Path,
     arguments: &[OsString],
     deadline: Instant,
     output_limit: usize,
+    environment: &CommandEnvironment,
 ) -> Result<Captured, RunError> {
     let mut command = Command::new(executable);
     command
@@ -52,6 +75,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0);
+    environment.apply(&mut command);
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     let Some(mut stdout) = child.stdout.take() else {
         terminate(&mut child);

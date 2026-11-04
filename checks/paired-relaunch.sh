@@ -2,7 +2,7 @@
 set -euo pipefail
 
 package=${1:?package}
-base=$(mktemp -d)
+base=$(mktemp -d /tmp/hpr.XXXXXX)
 launchers=()
 
 cleanup() {
@@ -29,33 +29,40 @@ start_pair() {
   child_pids=()
   for _ in $(seq 1 100); do
     read -r -a child_pids <<<"$(cat "/proc/$pair_pid/task/$pair_pid/children" 2>/dev/null || true)"
-    [[ ${#child_pids[@]} -eq 2 && -S $directory/herdr-meta-translator.sock ]] && break
+    [[ ${#child_pids[@]} -eq 3 && -S $directory/herdr-meta-translator.sock ]] && break
     sleep .05
   done
-  [[ ${#child_pids[@]} -eq 2 ]]
-  [[ -S $directory/herdr-meta-translator.sock ]]
+  if [[ ${#child_pids[@]} -ne 3 || ! -S $directory/herdr-meta-translator.sock ]]; then
+    cat "$base/$generation.log" >&2
+    return 1
+  fi
   "$package/bin/herdr-nexus-meta" one 'Configure.Polling.100' \
     | grep -q Configured
 }
 
-stop_one_and_require_survivor_exit() {
-  local first=${child_pids[0]} survivor=${child_pids[1]}
+stop_one_and_require_siblings_exit() {
+  local first=${child_pids[0]}
+  local -a siblings=("${child_pids[@]:1}")
   kill "$first"
   if wait "$pair_pid"; then
     echo 'paired launcher unexpectedly succeeded after a child exited' >&2
     return 1
   fi
-  for _ in $(seq 1 100); do
-    kill -0 "$survivor" 2>/dev/null || return 0
-    sleep .02
+  for sibling in "${siblings[@]}"; do
+    for _ in $(seq 1 100); do
+      kill -0 "$sibling" 2>/dev/null || break
+      sleep .02
+    done
+    if kill -0 "$sibling" 2>/dev/null; then
+      echo "paired launcher left sibling $sibling running" >&2
+      return 1
+    fi
   done
-  echo 'paired launcher left its survivor running' >&2
-  return 1
 }
 
 start_pair first
 old_children=("${child_pids[@]}")
-stop_one_and_require_survivor_exit
+stop_one_and_require_siblings_exit
 
 start_pair second
 for old in "${old_children[@]}"; do
@@ -63,6 +70,6 @@ for old in "${old_children[@]}"; do
     [[ $old != "$fresh" ]]
   done
 done
-stop_one_and_require_survivor_exit
+stop_one_and_require_siblings_exit
 
 echo PAIRED_RELAUNCH_OK

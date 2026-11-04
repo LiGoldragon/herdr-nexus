@@ -1045,6 +1045,45 @@
         "type": "github"
       }
     },
+    "herdr-patch": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1,
+        "narHash": "sha256-xQeUZLXwQmAjwamy0ExPM+ThvYgKs2mZJWPP2oAH+nM=",
+        "path": "/nix/store/kwavh83rncsz0sjqxd7pj6z68f9mi9gx-codex-executable-selection.patch",
+        "type": "path"
+      },
+      "original": {
+        "path": "/nix/store/kwavh83rncsz0sjqxd7pj6z68f9mi9gx-codex-executable-selection.patch",
+        "type": "path"
+      }
+    },
+    "herdr-source": {
+      "flake": false,
+      "locked": {
+        "lastModified": 0,
+        "narHash": "sha256-wL/xbaa1Dxx/R4+q5JZSCZ0tZKzo5hC6MSP3oQX6OFk=",
+        "path": "/nix/store/3jhxk12n1hhjw4a8y4a6fwiqaf37ydp6-source",
+        "type": "path"
+      },
+      "original": {
+        "path": "/nix/store/3jhxk12n1hhjw4a8y4a6fwiqaf37ydp6-source",
+        "type": "path"
+      }
+    },
+    "herdr-zig-cache": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1,
+        "narHash": "sha256-rKYQXFQKLX4oHEAIHrxbIuC6YmwZZOo3WZUVm3hAbRk=",
+        "path": "/nix/store/q99mxjl4knvj7jkahjfnxbzi1cxzh42v-herdr-libghostty-vt-zig-cache",
+        "type": "path"
+      },
+      "original": {
+        "path": "/nix/store/q99mxjl4knvj7jkahjfnxbzi1cxzh42v-herdr-libghostty-vt-zig-cache",
+        "type": "path"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1788400875,
@@ -1450,6 +1489,9 @@
       "inputs": {
         "ethos-zero": "ethos-zero",
         "flake-utils": "flake-utils_15",
+        "herdr-patch": "herdr-patch",
+        "herdr-source": "herdr-source",
+        "herdr-zig-cache": "herdr-zig-cache",
         "nixpkgs": "nixpkgs_8",
         "rust-build": "rust-build_8"
       }

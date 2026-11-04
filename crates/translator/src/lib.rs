@@ -1,10 +1,16 @@
 //! Text-front translator and typed herdr external boundary.
 
 pub mod runner;
+#[cfg(test)]
+mod runner_tests;
 pub mod server;
+#[cfg(test)]
+mod server_execution_tests;
 pub mod generated {
     pub mod argument;
+    pub mod backend_deployment;
 }
+pub mod backend_pair;
 pub use herdr_nexus_wire::frame as transport;
 pub use herdr_nexus_wire::transport_types;
 
