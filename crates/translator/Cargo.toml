@@ -7,3 +7,20 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "15b41da8f2579e73ead59bc0c2b97529b8ac32d3", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d90ff185d54bc0007b19a8d9bc390c6bfeb12", optional = true }
+
+[dependencies.signal-herdr-nexus]
+git = "https://github.com/LiGoldragon/signal-herdr-nexus"
+rev = "2a6c8883bb9ce1ac9467c359bd323c3aa895d580"
+
+[dependencies.shared-translator]
+package = "translator"
+git = "https://github.com/LiGoldragon/translator"
+rev = "04f6e6f3408d44a82396d36c5ac59940028466d1"
+
+
+[features]
+default = []
+text = ["dep:protos", "dep:datom-codec", "signal-herdr-nexus/datom", "shared-translator/text"]
+

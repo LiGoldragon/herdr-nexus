@@ -55,3 +55,34 @@ pub fn witness_agent_started(result: AgentStartedResult) -> Result<AgentStartedR
     if !result.agent.interactive_ready { return Err(StartWitnessError::NotReady); }
     Ok(result)
 }
+
+/// A one-request ordinary herdr connection. Subscriptions use another client
+/// connection and are intentionally not multiplexed here.
+pub struct Client {
+    socket: std::path::PathBuf,
+    capacity: shared_translator::FrameCapacity,
+}
+impl Client {
+    pub fn new(socket: impl Into<std::path::PathBuf>, capacity: shared_translator::FrameCapacity) -> Self { Self { socket: socket.into(), capacity } }
+    pub fn request(&self, query: signal_herdr_nexus::Query) -> Result<signal_herdr_nexus::Response, ClientError> {
+        use shared_translator::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
+        use std::os::unix::net::UnixStream;
+        let mut stream = UnixStream::connect(&self.socket).map_err(ClientError::Io)?;
+        let signal = query.signalize().map_err(|e| ClientError::Signal(format!("{e:?}")))?;
+        stream.write_frame(&signal, self.capacity).map_err(ClientError::Frame)?;
+        let body = stream.read_frame(self.capacity).map_err(ClientError::Frame)?;
+        Signal::<signal_herdr_nexus::Response>::from(Vec::<u8>::from(body)).restore().map_err(|e| ClientError::Signal(format!("{e:?}")))
+    }
+}
+#[derive(Debug)] pub enum ClientError { Io(std::io::Error), Frame(shared_translator::FrameError), Signal(String) }
+impl std::fmt::Display for ClientError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "herdr translator client error: {self:?}") } }
+impl std::error::Error for ClientError {}
+
+#[cfg(feature = "text")]
+pub fn request_text(client: &Client, text: &str, budget: &mut datom_codec::Budget) -> Result<String, ClientError> {
+    use datom_codec::{Actualizing, Potential};
+    let mut potential = Potential::<signal_herdr_nexus::Query>::from(text);
+    let query = potential.actualize(budget).map_err(|e| ClientError::Signal(format!("{e:?}")))?;
+    let response = client.request(query)?;
+    Ok(shared_translator::encode(&response))
+}
