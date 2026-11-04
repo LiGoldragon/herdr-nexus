@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 # Independent black-box oracle for the private, deployment-injected launcher.
 # The public wrapper is checked only for its one-Place interface.  The fake
@@ -121,9 +121,19 @@ require_backend_ready() {
   wait_backend
   [[ -S $config_root/herdr/sessions/$session/herdr.sock ]]
   [[ -S $config_root/herdr/sessions/$session/herdr-client.sock ]]
-  local status
+  local status fake_status
+  set +e
   status=$(XDG_CONFIG_HOME=$config_root XDG_STATE_HOME=$state_root \
     "$fake" --session "$session" status server --json)
+  fake_status=$?
+  set -e
+  if (( fake_status != 0 )); then
+    echo "FAKE_STATUS_FAILED status=$fake_status XDG_CONFIG_HOME=$config_root XDG_STATE_HOME=$state_root session=$session" >&2
+    if [[ -f $state_root/fixture.path-failure ]]; then
+      cat "$state_root/fixture.path-failure" >&2
+    fi
+    return "$fake_status"
+  fi
   [[ $status == *'"status":"running"'* ]]
   [[ $status == *'"running":true'* ]]
   [[ $status == *'"compatible":true'* ]]
