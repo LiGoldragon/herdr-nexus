@@ -184,7 +184,7 @@ fn serve_one_paired(
             );
         };
         let mut budget = ready.text_budget();
-        let timeout = ready.call_timeout;
+        let progress_timeout = bootstrap.admission.deadline;
         let query = (|| -> Result<_, ServerError> {
             let text = request.text().map_err(ServerError::Transport)?;
             decode_public(text, &mut budget)
@@ -194,7 +194,7 @@ fn serve_one_paired(
             Err(error) => {
                 drop(io);
                 let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-                    stream.try_clone().map_err(ServerError::Io)?, timeout,
+                    stream.try_clone().map_err(ServerError::Io)?, progress_timeout,
                 ).map_err(ServerError::Io)?;
                 return write_failed_frame(&mut output, lane, &error.to_string(), bootstrap.admission.frame_capacity);
             }
@@ -203,14 +203,14 @@ fn serve_one_paired(
             drop(io);
             return forward_public_stream(
                 stream,
-                configuration,
                 place,
                 caller,
                 query,
+                progress_timeout,
                 bootstrap.admission.frame_capacity,
             );
         }
-        let response = match forward_public(place, caller, query, timeout) {
+        let response = match forward_public(place, caller, query, progress_timeout) {
             Ok(response) => Frame {
                 lane: Lane::PublicText,
                 kind: Kind::Answered,
@@ -224,7 +224,7 @@ fn serve_one_paired(
         };
         drop(io);
         let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-            stream.try_clone().map_err(ServerError::Io)?, timeout,
+            stream.try_clone().map_err(ServerError::Io)?, progress_timeout,
         ).map_err(ServerError::Io)?;
         return transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
             .map_err(ServerError::Transport);
@@ -279,12 +279,8 @@ fn serve_one_paired(
         },
     };
     drop(io);
-    let response_timeout = match configuration.ready() {
-        Some(ready) => ready.call_timeout,
-        None => bootstrap.admission.deadline,
-    };
     let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-        stream.try_clone().map_err(ServerError::Io)?, response_timeout,
+        stream.try_clone().map_err(ServerError::Io)?, bootstrap.admission.deadline,
     ).map_err(ServerError::Io)?;
     transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
         .map_err(ServerError::Transport)
@@ -465,11 +461,7 @@ fn configure_text(
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
-            let timeout = match configuration.ready() {
-                Some(ready) => ready.call_timeout,
-                None => bootstrap.admission.deadline,
-            };
-            forward_meta(place, caller, core_setting(setting), timeout)?
+            forward_meta(place, caller, core_setting(setting), bootstrap.admission.deadline)?
         }
     };
     Ok(shared_translator::encode(&response))
@@ -584,10 +576,10 @@ where
 
 fn forward_public_stream(
     client: &UnixStream,
-    configuration: &TranslatorConfiguration,
     place: &Place,
     caller: crate::transport_types::Caller,
     input: signal_herdr_nexus::Query,
+    progress_timeout: Duration,
     admission_limit: usize,
 ) -> Result<(), ServerError> {
     use shared_translator::{FrameReading, FrameWriting};
@@ -598,13 +590,9 @@ fn forward_public_stream(
         });
     let core = UnixStream::connect(Path::new(&place.directory.0).join("herdr.sock"))
         .map_err(ServerError::Io)?;
-    let timeout = configuration
-        .ready()
-        .ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?
-        .call_timeout;
     let mut core_write = herdr_nexus_wire::deadline::DeadlineStream::new(
         core.try_clone().map_err(ServerError::Io)?,
-        timeout,
+        progress_timeout,
     )
     .map_err(ServerError::Io)?;
     let request = request
@@ -614,13 +602,9 @@ fn forward_public_stream(
         .write_frame(&request, FrameCapacity::from(MAXIMUM_SIGNAL_BYTES))
         .map_err(ServerError::Frame)?;
     loop {
-        let timeout = configuration
-            .ready()
-            .ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?
-            .call_timeout;
         let Some(body) = read_subscription_signal_frame(
             core.try_clone().map_err(ServerError::Io)?,
-            timeout,
+            progress_timeout,
             MAXIMUM_SIGNAL_BYTES,
         )? else {
             return Ok(());
@@ -641,7 +625,7 @@ fn forward_public_stream(
         };
         let mut client_write = herdr_nexus_wire::deadline::DeadlineStream::new(
             client.try_clone().map_err(ServerError::Io)?,
-            timeout,
+            progress_timeout,
         )
         .map_err(ServerError::Io)?;
         crate::transport::write_frame(&mut client_write, &frame, admission_limit)

@@ -249,3 +249,49 @@ exit 7"#,
     assert_eq!(refusal.exit_status_option.expect("exit status").0, 7);
     assert_eq!(refusal.message.0, "not configured");
 }
+
+#[test]
+fn start_execution_owns_its_timeout_instead_of_generic_call_timeout() {
+    let fixture = Fixture::new(
+        r#"sleep 0.08
+printf '%s\n' '{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"terminal_id":"t","name":"probe","agent":"codex","agent_status":"idle","workspace_id":"w","tab_id":"tab","pane_id":"w:p","focused":true,"interactive_ready":true,"revision":2},"argv":["codex"]}}'"#,
+    );
+    let runtime = Runtime::new(
+        fixture.executable.clone(),
+        std::time::Duration::from_millis(10),
+        64 * 1024,
+    )
+    .expect("runtime");
+    let command = Command {
+        agent_name: AgentName("probe".into()),
+        agent_kind: AgentKind::Codex,
+        executable: Executable::Configured,
+        string_vector: Vec::new(),
+    };
+
+    let began = std::time::Instant::now();
+    assert_eq!(
+        execute(
+            &runtime,
+            &herdr(Verb::AgentStart(AgentStart_Data {
+                pane_id: PaneId("w:p".into()),
+                command: command.clone(),
+                timeout: Timeout(200),
+            })),
+        ),
+        ExternalOutcome::Started(State::Idle)
+    );
+    assert!(began.elapsed() >= std::time::Duration::from_millis(70));
+
+    assert_eq!(
+        execute(
+            &runtime,
+            &herdr(Verb::AgentStart(AgentStart_Data {
+                pane_id: PaneId("w:p".into()),
+                command,
+                timeout: Timeout(20),
+            })),
+        ),
+        ExternalOutcome::Uncertain
+    );
+}

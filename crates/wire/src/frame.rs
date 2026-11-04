@@ -75,6 +75,47 @@ pub fn read_frame(input: &mut impl Read, admission_limit: usize) -> Result<Frame
     Ok(frame)
 }
 
+/// Waits without an idle deadline for the first response byte, then bounds
+/// all remaining frame progress by one absolute deadline.
+pub fn read_frame_after_idle(
+    mut stream: std::os::unix::net::UnixStream,
+    progress_timeout: std::time::Duration,
+    admission_limit: usize,
+) -> Result<Option<Frame>, TransportError> {
+    validate_limit(admission_limit)?;
+    stream.set_read_timeout(None)?;
+    let mut prefix = [0_u8; 4];
+    match stream.read(&mut prefix[..1]) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!("a one-byte buffer yields at most one byte"),
+        Err(error) => return Err(TransportError::Io(error)),
+    }
+    let mut progressing = crate::deadline::DeadlineStream::new(stream, progress_timeout)?;
+    progressing.read_exact(&mut prefix[1..])?;
+    let total =
+        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::InvalidLength)?;
+    if total < HEADER_BYTES {
+        return Err(TransportError::InvalidLength);
+    }
+    if total > admission_limit {
+        return Err(TransportError::TooLarge);
+    }
+    let mut body = vec![0_u8; total];
+    progressing.read_exact(&mut body)?;
+    let lane = decode_lane(body[0])?;
+    let kind = decode_kind(body[1])?;
+    let frame = Frame {
+        lane,
+        kind,
+        payload: body.split_off(HEADER_BYTES),
+    };
+    if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
+        frame.text()?;
+    }
+    Ok(Some(frame))
+}
+
 pub fn write_frame(
     output: &mut impl Write,
     frame: &Frame,
@@ -263,5 +304,44 @@ mod tests {
         assert_eq!(failure.written, 5);
         let mut complete = StopsAfter { limit: 9, bytes: Vec::new() };
         write_frame_witness(&mut complete, &frame, 64).expect("complete submission");
+    }
+
+    #[test]
+    fn idle_before_first_response_byte_has_no_lifetime_timeout() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let expected = Frame {
+            lane: Lane::EmissionSignal,
+            kind: Kind::Answered,
+            payload: vec![1, 2, 3],
+        };
+        let sent = expected.clone();
+        let peer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(60));
+            write_frame(&mut writer, &sent, 64).expect("late complete response");
+        });
+        let began = std::time::Instant::now();
+        assert_eq!(
+            read_frame_after_idle(reader, std::time::Duration::from_millis(10), 64)
+                .expect("idle response"),
+            Some(expected)
+        );
+        assert!(began.elapsed() >= std::time::Duration::from_millis(50));
+        peer.join().expect("peer");
+    }
+
+    #[test]
+    fn progress_after_first_response_byte_has_one_absolute_deadline() {
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().expect("pair");
+        let peer = std::thread::spawn(move || {
+            writer.write_all(&[0]).expect("first prefix byte");
+            std::thread::sleep(std::time::Duration::from_millis(80));
+        });
+        let began = std::time::Instant::now();
+        assert!(matches!(
+            read_frame_after_idle(reader, std::time::Duration::from_millis(15), 64),
+            Err(TransportError::Io(_))
+        ));
+        assert!(began.elapsed() < std::time::Duration::from_millis(70));
+        peer.join().expect("peer");
     }
 }

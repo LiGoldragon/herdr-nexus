@@ -880,7 +880,11 @@ impl ExternalEmitter for SocketEmitter {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
-        let mut stream = match DeadlineStream::new(stream, configuration.transport_timeout) {
+        let response_stream = match stream.try_clone() {
+            Ok(stream) => stream,
+            Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
+        };
+        let mut output = match DeadlineStream::new(stream, configuration.transport_timeout) {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
@@ -892,7 +896,7 @@ impl ExternalEmitter for SocketEmitter {
             }
         };
         if let Err(failure) = herdr_nexus_wire::frame::write_frame_witness(
-            &mut stream,
+            &mut output,
             &herdr_nexus_wire::frame::Frame {
                 lane: Lane::EmissionSignal,
                 kind: Kind::Request,
@@ -908,11 +912,14 @@ impl ExternalEmitter for SocketEmitter {
                 ),
             );
         }
+        drop(output);
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let body = herdr_nexus_wire::frame::read_frame(
-                &mut stream,
+            let body = herdr_nexus_wire::frame::read_frame_after_idle(
+                response_stream,
+                configuration.transport_timeout,
                 configuration.frame_capacity_bytes,
-            )?;
+            )?
+            .ok_or("translator closed without an emission answer")?;
             if body.lane != Lane::EmissionSignal || body.kind != Kind::Answered {
                 return Err("translator returned a non-answer emission frame".into());
             }
@@ -1216,21 +1223,12 @@ impl ConfigurationStore {
                     .is_some(),
             ),
         };
-        let cross_valid = match (candidate.transport_timeout, candidate.start_timeout) {
-            (Some(transport), Some(start)) => transport > start,
-            _ => true,
-        };
-        if !valid || !cross_valid {
+        if !valid {
             return Response::ConfigureRefused(ConfigurationRefusal::Invalid(Invalid_Data {
                 owner: Owner::Nexus,
                 setting_name: name,
                 message: Message(
-                    if valid {
-                        "TransportTimeout must exceed StartTimeout"
-                    } else {
-                        "invalid setting value"
-                    }
-                    .into(),
+                    "invalid setting value".into(),
                 ),
             }));
         }
@@ -1387,8 +1385,10 @@ mod tests {
     }
 
     #[test]
-    fn socket_emitter_uses_ready_sender_timeout_and_capacity() {
-        use emission_herdr_nexus::{Herdr, Verb};
+    fn socket_emitter_waits_idle_then_bounds_progress_and_capacity() {
+        use emission_herdr_nexus::{ExternalOutcome, Herdr, Verb};
+        use herdr_nexus_wire::transport_types::{Kind, Lane};
+        use signal::{ByteViewable, Signalizable};
         use std::os::unix::net::UnixListener;
 
         let directory = std::env::temp_dir().join(format!(
@@ -1397,10 +1397,6 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir(&directory).expect("fixture directory");
-        let admission = herdr_nexus_wire::ValidAdmission {
-            deadline: Duration::from_secs(1),
-            frame_capacity: signal::MAXIMUM_SIGNAL_BYTES,
-        };
         let herdr = Herdr {
             session: signal_herdr_nexus::Session("bounds".into()),
             verb: Verb::PaneList,
@@ -1409,8 +1405,30 @@ mod tests {
         let timeout_socket = directory.join("timeout.sock");
         let timeout_listener = UnixListener::bind(&timeout_socket).expect("timeout listener");
         let timeout_peer = std::thread::spawn(move || {
-            let (_stream, _) = timeout_listener.accept().expect("timeout connection");
+            let (mut stream, _) = timeout_listener.accept().expect("timeout connection");
+            let request = herdr_nexus_wire::frame::read_frame(
+                &mut stream,
+                signal::MAXIMUM_SIGNAL_BYTES,
+            )
+            .expect("emission request");
+            assert_eq!(request.lane, Lane::EmissionSignal);
+            assert_eq!(request.kind, Kind::Request);
             std::thread::sleep(Duration::from_millis(100));
+            let answer = emission_herdr_nexus::Response::Emitted(ExternalOutcome::Started(
+                signal_herdr_nexus::State::Idle,
+            ))
+            .signalize()
+            .expect("signalize answer");
+            herdr_nexus_wire::frame::write_frame(
+                &mut stream,
+                &herdr_nexus_wire::frame::Frame {
+                    lane: Lane::EmissionSignal,
+                    kind: Kind::Answered,
+                    payload: answer.bytes().to_vec(),
+                },
+                signal::MAXIMUM_SIGNAL_BYTES,
+            )
+            .expect("emission answer");
         });
         let emitter = SocketEmitter {
             translator_socket: timeout_socket,
@@ -1420,9 +1438,11 @@ mod tests {
         let began = Instant::now();
         assert!(matches!(
             emitter.emit(&configuration, herdr.clone()),
-            EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Uncertain)
+            EmissionResult::External(ExternalOutcome::Started(
+                signal_herdr_nexus::State::Idle
+            ))
         ));
-        assert!(began.elapsed() < admission.deadline);
+        assert!(began.elapsed() >= Duration::from_millis(90));
         timeout_peer.join().expect("timeout peer");
 
         let capacity_socket = directory.join("capacity.sock");
@@ -1629,23 +1649,6 @@ mod tests {
         };
         assert_eq!(known.len(), 1);
         assert_eq!(known[0].state, signal_herdr_nexus::State::Busy);
-    }
-
-    #[test]
-    fn transport_timeout_must_exceed_start_timeout() {
-        let store = ConfigurationStore::default();
-        let _ = store.configure(
-            core_meta_herdr_nexus::CoreSet::StartTimeout(meta_signal_herdr_nexus::Timeout(50)),
-            || Ok(()),
-        );
-        let response = store.configure(
-            core_meta_herdr_nexus::CoreSet::TransportTimeout(meta_signal_herdr_nexus::Timeout(50)),
-            || Ok(()),
-        );
-        assert!(matches!(
-            response,
-            core_meta_herdr_nexus::Response::ConfigureRefused(_)
-        ));
     }
 
     struct SubscriptionEmitter {
