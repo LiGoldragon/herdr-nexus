@@ -1,0 +1,18 @@
+Operation
+[ signal_herdr_nexus:[ Session Pane Workspace Command Text Keys Label ]
+  :signal_herdr_nexus:AttemptOutcome.Outcome ]          ; imports
+[ Creating.Workspace                                    ; attempts
+  Starting.{ Pane Command Label }
+  Prompting.{ Pane Text }
+  Pressing.{ Pane Keys }
+  Closing.Pane
+  Listing.Session
+  Subscribing.Session ]
+[ Created.AttemptOutcome                                ; every attempt ends in the shared wire outcome
+  Started.AttemptOutcome
+  Prompted.AttemptOutcome
+  Pressed.AttemptOutcome
+  Closed.AttemptOutcome
+  Listed.AttemptOutcome
+  Subscribed.AttemptOutcome ]
+[]                                                      ; types

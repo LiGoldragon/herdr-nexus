@@ -1,0 +1,12 @@
+[workspace]
+members = ["crates/core", "crates/daemon", "crates/emission", "crates/translator"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.89"
+
+[workspace.dependencies]
+signal-herdr-nexus = { git = "https://github.com/LiGoldragon/signal-herdr-nexus", rev = "2a6c8883bb9ce1ac9467c359bd323c3aa895d580", default-features = false }
+meta-signal-herdr-nexus = { git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus", rev = "aae557db87788dbf572e6b9244d8107dedaf76aa", default-features = false }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20", default-features = false }

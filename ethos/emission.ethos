@@ -1,0 +1,19 @@
+; Temporary stand-in: Emission is a Signal root until ethos-zero supports Emission.
+Signal
+[ meta_signal_herdr_nexus:[ Configuration ]             ; imports
+  signal_herdr_nexus:[ Session PaneId Pane Root Variable Command Text Keys State Refusal ] ]
+[ Execute.{ Configuration Herdr } ]                    ; emissions: one captured configuration and one typed call
+[ Executed.ExternalOutcome ]                           ; external outcome
+[ Herdr.{ Session Verb }                               ; types: exactly one Session per call
+  Verb.[ WorkspaceCreate.{ Root Vector<Variable> }
+         AgentStart.{ PaneId Command }
+         AgentPrompt.{ PaneId Text }
+         Keys.{ PaneId Keys }
+         PaneClose.PaneId
+         PaneList ]
+  PaneObservation.{ Pane State }
+  ExternalOutcome.[ Done
+                    Created.Pane
+                    Listed.Vector<PaneObservation>
+                    Refused.Refusal
+                    Uncertain ] ]

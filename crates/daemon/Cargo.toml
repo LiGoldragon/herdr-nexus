@@ -1,0 +1,15 @@
+[package]
+name = "herdr-nexus-daemon"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+herdr-nexus-core = { path = "../core" }
+signal-herdr-nexus.workspace = true
+meta-signal-herdr-nexus.workspace = true
+signal = { workspace = true, features = ["transport"] }
+
+[lints.rust]
+unsafe_code = "forbid"
