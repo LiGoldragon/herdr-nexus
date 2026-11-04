@@ -4,50 +4,7 @@ use meta_signal_herdr_nexus::{BootstrapRefusal, Message, SocketPath};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-/// Applies one absolute deadline across all reads and writes performed by a
-/// framed attempt. Recomputing the socket timeout before every syscall keeps a
-/// peer that drip-feeds a partial frame from extending the attempt forever.
-pub struct DeadlineStream {
-    stream: std::os::unix::net::UnixStream,
-    deadline: Instant,
-}
-
-impl DeadlineStream {
-    pub fn new(stream: std::os::unix::net::UnixStream, timeout: Duration) -> std::io::Result<Self> {
-        let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "deadline overflow")
-        })?;
-        Ok(Self { stream, deadline })
-    }
-
-    fn remaining(&self) -> std::io::Result<Duration> {
-        self.deadline
-            .checked_duration_since(Instant::now())
-            .filter(|d| !d.is_zero())
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::TimedOut, "attempt deadline elapsed")
-            })
-    }
-}
-
-impl std::io::Read for DeadlineStream {
-    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
-        self.stream.set_read_timeout(Some(self.remaining()?))?;
-        std::io::Read::read(&mut self.stream, buffer)
-    }
-}
-
-impl std::io::Write for DeadlineStream {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        std::io::Write::write(&mut self.stream, buffer)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stream.set_write_timeout(Some(self.remaining()?))?;
-        std::io::Write::flush(&mut self.stream)
-    }
-}
+pub use herdr_nexus_wire::deadline::DeadlineStream;
 
 pub const PUBLIC_SOCKET_NAME: &str = "herdr.sock";
 pub const META_SOCKET_NAME: &str = "herdr-meta.sock";
@@ -191,9 +148,19 @@ where
 {
     use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
     let frame = stream.read_frame(capacity)?;
-    let query = Signal::<core_meta_herdr_nexus::Query>::from(Vec::<u8>::from(frame)).restore()?;
+    let query = Signal::<herdr_nexus_wire::meta_call::Query>::from(Vec::<u8>::from(frame)).restore()?;
     let response = match query {
-        core_meta_herdr_nexus::Query::Configure(setting) => configure(setting),
+        herdr_nexus_wire::meta_call::Query::Call(call) if same_login(&call.caller) => {
+            let response = match call.input.0 {
+                core_meta_herdr_nexus::Query::Configure(setting) => configure(setting),
+            };
+            herdr_nexus_wire::meta_call::Response::Answered(
+                herdr_nexus_wire::meta_payload::Output(response),
+            )
+        }
+        herdr_nexus_wire::meta_call::Query::Call(_) => {
+            herdr_nexus_wire::meta_call::Response::Failed("caller is outside the bound login".into())
+        }
     };
     stream.write_frame(&response.signalize()?, capacity)?;
     Ok(())
@@ -213,10 +180,23 @@ where
 {
     use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
     let frame = stream.read_frame(capacity)?;
-    let query = Signal::<signal_herdr_nexus::Query>::from(Vec::<u8>::from(frame)).restore()?;
-    let response = handle(query);
+    let query = Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(frame)).restore()?;
+    let response = match query {
+        herdr_nexus_wire::public_call::Query::Call(call) if same_login(&call.caller) => {
+            herdr_nexus_wire::public_call::Response::Answered(
+                herdr_nexus_wire::public_payload::Output(handle(call.input.0)),
+            )
+        }
+        herdr_nexus_wire::public_call::Query::Call(_) => {
+            herdr_nexus_wire::public_call::Response::Failed("caller is outside the bound login".into())
+        }
+    };
     stream.write_frame(&response.signalize()?, capacity)?;
     Ok(())
+}
+
+fn same_login(caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
+    caller.user_id.0 == i64::from(nix::unistd::getuid().as_raw())
 }
 
 pub struct Dispatcher {
@@ -493,16 +473,24 @@ impl Dispatcher {
         configuration: &RuntimeConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> emission_herdr_nexus::ExternalOutcome {
-        use signal::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
+        use signal::{ByteViewable, Restorable, Signal, Signalizable};
+        use herdr_nexus_wire::transport_types::{Kind, Lane};
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let stream = std::os::unix::net::UnixStream::connect(&self.translator_socket)?;
             let mut stream = DeadlineStream::new(stream, configuration.transport_timeout)?;
             let request = emission_herdr_nexus::Query::Emit(herdr);
-            let capacity = signal::FrameCapacity::from(configuration.frame_capacity_bytes);
-            stream.write_frame(&request.signalize()?, capacity)?;
-            let body = stream.read_frame(capacity)?;
+            let request = request.signalize()?;
+            herdr_nexus_wire::frame::write_frame(&mut stream, &herdr_nexus_wire::frame::Frame {
+                lane: Lane::EmissionSignal,
+                kind: Kind::Request,
+                payload: request.bytes().to_vec(),
+            }, configuration.frame_capacity_bytes)?;
+            let body = herdr_nexus_wire::frame::read_frame(&mut stream, configuration.frame_capacity_bytes)?;
+            if body.lane != Lane::EmissionSignal || body.kind != Kind::Answered {
+                return Err("translator returned a non-answer emission frame".into());
+            }
             let response =
-                Signal::<emission_herdr_nexus::Response>::from(Vec::<u8>::from(body)).restore()?;
+                Signal::<emission_herdr_nexus::Response>::from(body.payload).restore()?;
             match response {
                 emission_herdr_nexus::Response::Emitted(outcome) => Ok(outcome),
             }

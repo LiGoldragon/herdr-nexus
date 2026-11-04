@@ -1,0 +1,6 @@
+Library
+[ core_meta_herdr_nexus:[ Query Response ] ]           ; imports
+[ Input.core_meta_herdr_nexus:Query                    ; types
+  Output.core_meta_herdr_nexus:Response ]
+[]                                                     ; traits
+[]                                                     ; associations

@@ -1,3 +1,27 @@
-use datom_codec::{Actualizing,Budget,Potential}; use std::{env,fs,os::unix::net::UnixStream}; use shared_translator::{FrameReading,FrameWriting,Restorable,Signal,Signalizable};
-fn budget()->Budget{Budget{remaining:1_000_000,reader:protos::ReaderBudget{remaining:1_000_000},depth:0,maximum_depth:1024}}
-fn main()->Result<(),Box<dyn std::error::Error>>{let mut a=env::args().skip(1);let registry_path=a.next().ok_or("REGISTRY_PATH")?;let name=a.next().ok_or("NAME")?;let text=a.next().ok_or("DATOM")?;let mut b=budget();let r=herdr_nexus_translator::registry::decode(&fs::read_to_string(registry_path)?,&mut b).map_err(|e|format!("{e:?}"))?;let place=herdr_nexus_translator::registry::select(&r,&name).map_err(|e|format!("{e:?}"))?;let mut p=Potential::<meta_signal_herdr_nexus::Query>::from(text);let q=p.actualize(&mut budget()).map_err(|e|format!("{e:?}"))?;let mut s=UnixStream::connect(std::path::Path::new(&place.directory.0).join("herdr-meta.sock"))?;s.write_frame(&q.signalize()?,shared_translator::FrameCapacity::default())?;let body=s.read_frame(shared_translator::FrameCapacity::default())?;let r:meta_signal_herdr_nexus::Response=Signal::from(Vec::from(body)).restore()?;println!("{}",shared_translator::encode(&r));if !matches!(r,meta_signal_herdr_nexus::Response::Configured(_)){std::process::exit(1)}Ok(())}
+use herdr_nexus_translator::{registry, TextClient};
+use herdr_nexus_translator::transport_types::Lane;
+use std::{env, fs};
+
+fn budget() -> datom_codec::Budget {
+    datom_codec::Budget {
+        remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("signal bound fits budget"),
+        reader: protos::ReaderBudget { remaining: signal::MAXIMUM_SIGNAL_BYTES },
+        depth: 0,
+        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH).expect("signal depth fits budget"),
+    }
+}
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut arguments = env::args().skip(1);
+    let registry_path = arguments.next().ok_or("REGISTRY_PATH")?;
+    let name = arguments.next().ok_or("NAME")?;
+    let text = arguments.next().ok_or("DATOM")?;
+    let registry = registry::decode(&fs::read_to_string(registry_path)?, &mut budget())
+        .map_err(|error| format!("{error:?}"))?;
+    let place = registry::select(&registry, &name).map_err(|error| format!("{error:?}"))?;
+    let client = TextClient::new(
+        std::path::Path::new(&place.directory.0).join("herdr-translator.sock"),
+        signal::MAXIMUM_SIGNAL_BYTES,
+    );
+    println!("{}", client.request(Lane::MetaText, &text)?);
+    Ok(())
+}

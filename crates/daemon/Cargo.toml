@@ -9,11 +9,12 @@ publish = false
 herdr-nexus-core = { path = "../core" }
 emission-herdr-nexus = { path = "../emission" }
 core-meta-herdr-nexus = { path = "../core-meta" }
+herdr-nexus-wire = { path = "../wire" }
 signal-herdr-nexus.workspace = true
 meta-signal-herdr-nexus.workspace = true
 signal = { workspace = true, features = ["transport"] }
 shared-translator.workspace = true
-nix = { version = "0.30", features = ["fs"] }
+nix = { version = "0.30", features = ["fs", "user"] }
 
 [lints.rust]
 unsafe_code = "forbid"

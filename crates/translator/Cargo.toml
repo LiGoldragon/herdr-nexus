@@ -8,6 +8,8 @@ publish = false
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
+herdr-nexus-wire = { path = "../wire" }
+core-meta-herdr-nexus = { path = "../core-meta" }
 nix = { version = "0.30", features = ["fs", "process", "signal", "socket"] }
 rkyv = { version = "0.8", features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "0cad1d1aeddec7da2971dc88e964320a6db48c20" }

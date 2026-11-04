@@ -188,6 +188,7 @@ dependencies = [
  "core-meta-herdr-nexus",
  "emission-herdr-nexus",
  "herdr-nexus-core",
+ "herdr-nexus-wire",
  "meta-signal-herdr-nexus",
  "nix",
  "signal",
@@ -199,8 +200,10 @@ dependencies = [
 name = "herdr-nexus-translator"
 version = "0.1.0"
 dependencies = [
+ "core-meta-herdr-nexus",
  "datom-codec 0.32.3",
  "emission-herdr-nexus",
+ "herdr-nexus-wire",
  "libc",
  "meta-signal-herdr-nexus",
  "nix",
@@ -211,6 +214,17 @@ dependencies = [
  "signal",
  "signal-herdr-nexus",
  "translator",
+]
+
+[[package]]
+name = "herdr-nexus-wire"
+version = "0.1.0"
+dependencies = [
+ "core-meta-herdr-nexus",
+ "nix",
+ "rkyv",
+ "signal",
+ "signal-herdr-nexus",
 ]
 
 [[package]]

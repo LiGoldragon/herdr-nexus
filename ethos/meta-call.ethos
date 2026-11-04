@@ -1,0 +1,7 @@
+Signal
+[ transport:[ Caller ]                                 ; imports
+  meta_payload:[ Input Output ] ]
+[ Call.{ Caller Input } ]                              ; inputs
+[ Answered.Output                                      ; outputs
+  Failed.String ]
+[]                                                     ; types
