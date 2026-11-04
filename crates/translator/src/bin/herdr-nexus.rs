@@ -1,0 +1,3 @@
+use herdr_nexus_translator::{registry,Client}; use datom_codec::Budget; use std::{env,fs};
+fn budget()->Budget{Budget{remaining:1_000_000,reader:protos::ReaderBudget{remaining:1_000_000},depth:0,maximum_depth:1024}}
+fn main()->Result<(),Box<dyn std::error::Error>>{let mut a=env::args().skip(1);let p=a.next().ok_or("REGISTRY_PATH")?;let n=a.next().ok_or("NAME")?;let d=a.next().ok_or("DATOM")?;let r=registry::decode(&fs::read_to_string(p)?,&mut budget()).map_err(|e| format!("{e:?}"))?;let place=registry::select(&r,&n).map_err(|e| format!("{e:?}"))?;let c=Client::new(std::path::Path::new(&place.directory.0).join("herdr.sock"),shared_translator::FrameCapacity::default());println!("{}",c.request_text(&d,&mut budget())?);Ok(())}

@@ -103,3 +103,6 @@ impl Client {
     }
 }
 pub mod server;
+impl Client { #[cfg(feature="text")] pub fn request_text(&self,text:&str,budget:&mut datom_codec::Budget)->Result<String,ClientError>{ let mut p=datom_codec::Potential::<signal_herdr_nexus::Query>::from(text); use datom_codec::Actualizing; let q=p.actualize(budget).map_err(|e|ClientError::Signal(format!("{e:?}")))?; let r=self.request(q)?; Ok(shared_translator::encode(&r)) } }
+
+#[cfg(feature="text")] pub use shared_translator::{placement, registry};

@@ -31,4 +31,18 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "f7f43dc0ab38c7a7e35621ca6d3b6c9d9c75331e"
+rev = "0e3c7abee1c2939793b88ca6a39b991b2a17de64"
+features = ["datom"]
+
+[[bin]]
+name = "herdr-nexus"
+path = "src/bin/herdr-nexus.rs"
+required-features = ["text"]
+[[bin]]
+name = "herdr-nexus-meta"
+path = "src/bin/herdr-nexus-meta.rs"
+required-features = ["text"]
+[[bin]]
+name = "herdr-nexus-place"
+path = "src/bin/herdr-nexus-place.rs"
+required-features = ["text"]
