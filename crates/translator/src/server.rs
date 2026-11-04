@@ -858,13 +858,18 @@ fn list_invocation(session: &Session, runtime: &Runtime, agent: bool) -> Invocat
 
 fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured> {
     let deadline = Instant::now().checked_add(invocation.timeout)?;
-    runner::run(
+    match runner::run(
         &runtime.executable,
         &invocation.arguments,
         deadline,
         runtime.output_limit,
-    )
-    .ok()
+    ) {
+        Ok(captured) => Some(captured),
+        Err(error) => {
+            eprintln!("herdr client execution failed: {error}");
+            None
+        }
+    }
 }
 
 fn execute_list(runtime: &Runtime, session: &Session) -> ExternalOutcome {
@@ -910,6 +915,12 @@ fn refusal_or_uncertain(captured: &Captured) -> ExternalOutcome {
     // success channel and is never tried as a fallback failure language.
     let envelope = serde_json::from_slice::<ErrorEnvelope>(&captured.stderr);
     let Ok(envelope) = envelope else {
+        eprintln!(
+            "herdr refusal was not its stderr JSON contract (status={:?}, stdout_bytes={}, stderr_bytes={})",
+            captured.status.code(),
+            captured.stdout.len(),
+            captured.stderr.len(),
+        );
         return ExternalOutcome::Uncertain;
     };
     ExternalOutcome::Refused(Refusal {

@@ -89,6 +89,7 @@ pub fn run(
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => {
                     terminate(&mut child);
                     return Err(RunError::Pipe(error));
@@ -106,6 +107,7 @@ pub fn run(
                     }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => {
                     terminate(&mut child);
                     return Err(RunError::Pipe(error));

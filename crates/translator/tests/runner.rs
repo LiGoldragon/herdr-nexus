@@ -28,6 +28,16 @@ fn captures_both_streams_within_one_joint_limit() {
 }
 
 #[test]
+fn rapid_child_exit_still_drains_stderr() {
+    for _ in 0..64 {
+        let captured = shell("printf refusal >&2; exit 7", Duration::from_secs(2), 64)
+            .expect("rapid child capture");
+        assert_eq!(captured.status.code(), Some(7));
+        assert_eq!(captured.stderr, b"refusal");
+    }
+}
+
+#[test]
 fn crossing_joint_limit_kills_and_reaps_group() {
     let started = Instant::now();
     let result = shell(
