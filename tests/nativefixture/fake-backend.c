@@ -7,6 +7,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Native fixture for the exact backend CLI/lifetime surface owned by the pair. */
@@ -137,6 +138,16 @@ int main(int argc, char **argv) {
   if (!config || !state || mkdirs(config) < 0 || mkdirs(state) < 0 || paths(argv[2], config, state) < 0) return 65;
   if (strcmp(argv[3], "status") == 0 && (argc == 5 || argc == 6) && strcmp(argv[4], "server") == 0)
     return emit_status(argv[2], state, argc == 6 && strcmp(argv[5], "--json") == 0);
+  if (argc >= 5 && strcmp(argv[3], "workspace") == 0 && strcmp(argv[4], "create") == 0) {
+    puts("{\"id\":\"cli:workspace:create\",\"result\":{\"type\":\"workspace_created\",\"workspace\":{},\"tab\":{},\"root_pane\":{\"pane_id\":\"w:p\",\"terminal_id\":\"t\",\"workspace_id\":\"w\",\"tab_id\":\"tab\",\"focused\":true,\"agent_status\":\"unknown\",\"revision\":1}}}");
+    return 0;
+  }
+  if (argc >= 5 && strcmp(argv[3], "agent") == 0 && strcmp(argv[4], "start") == 0) {
+    struct timespec delay = {.tv_sec = 0, .tv_nsec = 200000000};
+    nanosleep(&delay, NULL);
+    puts("{\"id\":\"cli:agent:start\",\"result\":{\"type\":\"agent_started\",\"agent\":{\"terminal_id\":\"t\",\"name\":\"probe\",\"agent\":\"codex\",\"agent_status\":\"idle\",\"workspace_id\":\"w\",\"tab_id\":\"tab\",\"pane_id\":\"w:p\",\"focused\":true,\"interactive_ready\":true,\"revision\":2},\"argv\":[\"codex\"]}}");
+    return 0;
+  }
   if (strcmp(argv[3], "server") != 0) return 64;
   if (argc == 5 && strcmp(argv[4], "stop") == 0) { pid_t pid; return read_pid(&pid) == 0 && kill(pid, SIGTERM) == 0 ? 0 : 1; }
   return argc == 4 ? serve(argv[2], config, state) : 64;
