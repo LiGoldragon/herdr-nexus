@@ -1,11 +1,23 @@
 Library
-[]                                                    ; imports
+[ shared_translator:[ Place ]                         ; imports
+  meta_signal_herdr_nexus:[ BudgetValue ] ]
 [ UserId.Integer                                      ; types
   GroupId.Integer
   ProcessId.Integer
   Caller.{ UserId GroupId ProcessId }
   Lane.[ PublicText MetaText EmissionSignal ]
   Kind.[ Request Answered Failed ]
-  Failure.String ]
+  Failure.String
+  PublicNexusSocket.String
+  MetaNexusSocket.String
+  PublicTranslatorSocket.String
+  MetaTranslatorSocket.String
+  SocketNames.{ PublicNexusSocket MetaNexusSocket
+                 PublicTranslatorSocket MetaTranslatorSocket }
+  FrameDeadlineMilliseconds.Integer
+  FrameCapacityBytes.Integer
+  Admission.{ FrameDeadlineMilliseconds FrameCapacityBytes }
+  CoreBootstrap.{ Place Admission }
+  TranslatorBootstrap.{ Place Admission BudgetValue } ]
 []                                                    ; traits
 []                                                    ; associations

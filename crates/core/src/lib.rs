@@ -305,6 +305,12 @@ impl<M: Memory> Core<M> {
         }
     }
 
+    pub fn owned_in_session(&self, session: &Session) -> Result<Vec<OwnedPane>, Outcome> {
+        self.memory
+            .owned_in_session(session)
+            .map_err(|refusal| store_refused(refusal, StorePhase::BeforeEmission))
+    }
+
     fn finish_done(&mut self, attempt: Attempt, external: ExternalResult<()>) -> Outcome {
         match external {
             ExternalResult::Succeeded(()) => Outcome::Done,

@@ -6,20 +6,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let place = {
         let mut input = std::io::stdin().lock();
         let body = input.read_frame(bootstrap_capacity)?;
-        let place =
-            Signal::<shared_translator::placement::Place>::from(Vec::<u8>::from(body)).restore()?;
+        let bootstrap = Signal::<herdr_nexus_wire::transport_types::CoreBootstrap>::from(
+            Vec::<u8>::from(body),
+        )
+        .restore()?;
         drop(input);
         nix::unistd::close(0)?;
-        place
+        bootstrap
     };
-    let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(&place)?);
+    let admission = herdr_nexus_wire::ValidAdmission::try_from(&place.admission)
+        .map_err(|message| format!("invalid core bootstrap admission: {message}"))?;
+    let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(&place.place, admission)?);
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(bootstrap.paths()));
 
     let meta = Arc::clone(&bootstrap);
     std::thread::spawn(move || loop {
-        if meta.serve_next_meta(bootstrap_capacity).is_err() {
-            return;
-        }
+        let _ = meta.serve_next_meta();
     });
 
     loop {

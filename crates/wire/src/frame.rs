@@ -100,6 +100,52 @@ pub fn write_frame(
     Ok(())
 }
 
+#[derive(Debug)]
+pub struct IncompleteSubmission {
+    pub written: usize,
+    pub error: TransportError,
+}
+
+/// Writes one frame while witnessing whether every byte was submitted. Any
+/// failure returned here proves the request was incomplete; loss after `Ok`
+/// is the separate possibly-executed case.
+pub fn write_frame_witness(
+    output: &mut impl Write,
+    frame: &Frame,
+    admission_limit: usize,
+) -> Result<(), IncompleteSubmission> {
+    let mut bytes = Vec::new();
+    write_frame(&mut bytes, frame, admission_limit).map_err(|error| IncompleteSubmission {
+        written: 0,
+        error,
+    })?;
+    let mut written = 0;
+    while written < bytes.len() {
+        match output.write(&bytes[written..]) {
+            Ok(0) => {
+                return Err(IncompleteSubmission {
+                    written,
+                    error: TransportError::Io(std::io::Error::new(
+                        std::io::ErrorKind::WriteZero,
+                        "request frame write returned zero",
+                    )),
+                })
+            }
+            Ok(count) => written += count,
+            Err(error) => {
+                return Err(IncompleteSubmission {
+                    written,
+                    error: TransportError::Io(error),
+                })
+            }
+        }
+    }
+    output.flush().map_err(|error| IncompleteSubmission {
+        written,
+        error: TransportError::Io(error),
+    })
+}
+
 pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<Caller, TransportError> {
     let credentials = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
         .map_err(|error| TransportError::PeerCredential(error.to_string()))?;
@@ -195,5 +241,27 @@ mod tests {
             read_frame(&mut Cursor::new(&mut unknown), 128),
             Err(TransportError::UnknownLane(9))
         ));
+    }
+
+    #[test]
+    fn submission_witness_distinguishes_partial_from_complete() {
+        struct StopsAfter { limit: usize, bytes: Vec<u8> }
+        impl Write for StopsAfter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                if self.bytes.len() == self.limit {
+                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture stop"));
+                }
+                let count = bytes.len().min(self.limit - self.bytes.len());
+                self.bytes.extend_from_slice(&bytes[..count]);
+                Ok(count)
+            }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        let frame = Frame { lane: Lane::EmissionSignal, kind: Kind::Request, payload: vec![1, 2, 3] };
+        let mut partial = StopsAfter { limit: 5, bytes: Vec::new() };
+        let failure = write_frame_witness(&mut partial, &frame, 64).expect_err("partial fixture");
+        assert_eq!(failure.written, 5);
+        let mut complete = StopsAfter { limit: 9, bytes: Vec::new() };
+        write_frame_witness(&mut complete, &frame, 64).expect("complete submission");
     }
 }

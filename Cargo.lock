@@ -221,10 +221,12 @@ name = "herdr-nexus-wire"
 version = "0.1.0"
 dependencies = [
  "core-meta-herdr-nexus",
+ "meta-signal-herdr-nexus",
  "nix",
  "rkyv",
  "signal",
  "signal-herdr-nexus",
+ "translator",
 ]
 
 [[package]]

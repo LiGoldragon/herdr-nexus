@@ -10,6 +10,8 @@ rkyv = { version = "0.8", default-features = false, features = ["std", "bytechec
 signal = { workspace = true }
 signal-herdr-nexus = { workspace = true }
 core-meta-herdr-nexus = { path = "../core-meta" }
+meta-signal-herdr-nexus.workspace = true
+shared-translator.workspace = true
 nix = { version = "0.30", features = ["socket"] }
 
 [lints.rust]

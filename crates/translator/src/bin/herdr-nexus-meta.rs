@@ -18,8 +18,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = registry::decode(&fs::read_to_string(registry_path)?, &mut budget())
         .map_err(|error| format!("{error:?}"))?;
     let place = registry::select(&registry, &name).map_err(|error| format!("{error:?}"))?;
+    let names = herdr_nexus_wire::socket_names();
     let client = TextClient::new(
-        std::path::Path::new(&place.directory.0).join("herdr-translator.sock"),
+        std::path::Path::new(&place.directory.0).join(names.meta_translator_socket.0),
         signal::MAXIMUM_SIGNAL_BYTES,
     );
     println!("{}", client.request(Lane::MetaText, &text)?);

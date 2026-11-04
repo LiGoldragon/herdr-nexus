@@ -14,40 +14,81 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const SOCKET_NAME: &str = "herdr-translator.sock";
 const MAXIMUM_SIGNAL_BYTES: usize = 8 * 1024 * 1024;
 
-pub fn run(place: &Place) -> Result<(), ServerError> {
-    let socket = Path::new(&place.directory.0).join(SOCKET_NAME);
-    let bound = OwnedSocket::bind(socket)?;
+#[derive(Clone, Copy)]
+pub enum Endpoint {
+    Public,
+    Meta,
+}
+
+pub fn run(bootstrap: &herdr_nexus_wire::transport_types::TranslatorBootstrap) -> Result<(), ServerError> {
+    let place = &bootstrap.place;
+    let admission = herdr_nexus_wire::ValidAdmission::try_from(&bootstrap.admission)
+        .map_err(|message| ServerError::Signal(message.into()))?;
+    let bootstrap_budget = validated_budget(&bootstrap.budget_value)
+        .ok_or_else(|| ServerError::Signal("invalid bootstrap text budget".into()))?;
+    let names = herdr_nexus_wire::socket_names();
+    let public = OwnedSocket::bind(
+        Path::new(&place.directory.0).join(names.public_translator_socket.0),
+    )?;
+    let meta = OwnedSocket::bind(
+        Path::new(&place.directory.0).join(names.meta_translator_socket.0),
+    )?;
     let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
+    let meta_configuration = std::sync::Arc::clone(&configuration);
+    let meta_place = place.clone();
+    std::thread::spawn(move || serve_listener(meta, meta_configuration, meta_place, Endpoint::Meta, admission, bootstrap_budget));
+    serve_listener(public, configuration, place.clone(), Endpoint::Public, admission, bootstrap_budget);
+    Ok(())
+}
+
+fn serve_listener(
+    bound: OwnedSocket,
+    configuration: std::sync::Arc<TranslatorConfiguration>,
+    place: Place,
+    endpoint: Endpoint,
+    admission: herdr_nexus_wire::ValidAdmission,
+    bootstrap_budget: (usize, usize),
+) {
     for stream in bound.listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         std::thread::spawn(move || {
-            let _ = serve_one(&mut stream, &configuration, &place);
+            let _ = serve_one(&mut stream, &configuration, &place, endpoint, admission, bootstrap_budget);
         });
     }
-    Ok(())
 }
 
 pub fn serve_one(
     stream: &mut UnixStream,
     configuration: &TranslatorConfiguration,
     place: &Place,
+    endpoint: Endpoint,
+    admission: herdr_nexus_wire::ValidAdmission,
+    bootstrap_budget: (usize, usize),
 ) -> Result<(), ServerError> {
     use crate::transport::{self, Frame};
     use crate::transport_types::{Kind, Lane};
-    let request = transport::read_frame(stream, MAXIMUM_SIGNAL_BYTES)
+    let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
+    let mut io = herdr_nexus_wire::deadline::DeadlineStream::new(stream.try_clone().map_err(ServerError::Io)?, admission.deadline)
+        .map_err(ServerError::Io)?;
+    let request = transport::read_frame(&mut io, admission.frame_capacity)
         .map_err(ServerError::Transport)?;
     if request.kind != Kind::Request {
         return Err(ServerError::Transport(crate::transport::TransportError::InvalidLength));
     }
     let lane = request.lane.clone();
-    let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
+    let allowed = match endpoint {
+        Endpoint::Public => matches!(&lane, Lane::PublicText | Lane::EmissionSignal),
+        Endpoint::Meta => lane == Lane::MetaText,
+    };
+    if !allowed {
+        return write_failed_frame(&mut io, lane, "lane is unavailable on this endpoint", admission.frame_capacity);
+    }
     if caller.user_id.0 != i64::from(nix::unistd::getuid().as_raw()) {
-        return write_failed_frame(stream, lane, "caller is outside the bound login");
+        return write_failed_frame(&mut io, lane, "caller is outside the bound login", admission.frame_capacity);
     }
     let response = (|| -> Result<Frame, ServerError> { Ok(match request.lane {
         Lane::EmissionSignal => {
@@ -65,7 +106,14 @@ pub fn serve_one(
         }
         Lane::MetaText => {
             let text = request.text().map_err(ServerError::Transport)?;
-            let response = configure_text(configuration, place, caller.clone(), text)?;
+            let response = configure_text(
+                configuration,
+                place,
+                caller.clone(),
+                text,
+                bootstrap_budget,
+                admission.deadline,
+            )?;
             Frame { lane: Lane::MetaText, kind: Kind::Answered, payload: response.into_bytes() }
         }
         Lane::PublicText => {
@@ -86,14 +134,15 @@ pub fn serve_one(
             payload: error.to_string().into_bytes(),
         },
     };
-    transport::write_frame(stream, &response, MAXIMUM_SIGNAL_BYTES)
+    transport::write_frame(&mut io, &response, admission.frame_capacity)
         .map_err(ServerError::Transport)
 }
 
 fn write_failed_frame(
-    stream: &mut UnixStream,
+    stream: &mut impl std::io::Write,
     lane: crate::transport_types::Lane,
     message: &str,
+    admission_limit: usize,
 ) -> Result<(), ServerError> {
     crate::transport::write_frame(
         stream,
@@ -102,7 +151,7 @@ fn write_failed_frame(
             kind: crate::transport_types::Kind::Failed,
             payload: message.as_bytes().to_vec(),
         },
-        MAXIMUM_SIGNAL_BYTES,
+        admission_limit,
     )
     .map_err(ServerError::Transport)
 }
@@ -121,6 +170,9 @@ struct PartialTranslatorConfiguration {
 }
 
 impl TranslatorConfiguration {
+    fn call_timeout(&self) -> Option<Duration> {
+        self.partial.read().ok()?.call_timeout
+    }
     fn runtime(&self) -> Option<Runtime> {
         let partial = self.partial.read().ok()?.clone();
         Runtime::new(partial.executable?, partial.call_timeout?, partial.output_limit?)
@@ -172,9 +224,11 @@ fn configure_text(
     place: &Place,
     caller: crate::transport_types::Caller,
     text: &str,
+    bootstrap_limits: (usize, usize),
+    bootstrap_timeout: Duration,
 ) -> Result<String, ServerError> {
     use datom_codec::{Actualizing, Potential};
-    let mut budget = bootstrap_budget();
+    let mut budget = budget(bootstrap_limits);
     let mut potential = Potential::<meta_signal_herdr_nexus::Query>::from(text);
     let query = potential.actualize(&mut budget)
         .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
@@ -185,11 +239,7 @@ fn configure_text(
             | meta_signal_herdr_nexus::Set::OutputLimit(_)
             | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
-            let Some((_, timeout)) = configuration.text_context() else {
-                return Ok(shared_translator::encode(&meta_signal_herdr_nexus::Response::ConfigureRefused(
-                    invalid_setting(meta_signal_herdr_nexus::Owner::Translator, setting_name(&setting), "translator is awaiting settings"),
-                )));
-            };
+            let timeout = configuration.call_timeout().unwrap_or(bootstrap_timeout);
             forward_meta(place, caller, core_setting(setting), timeout)?
         }
     };
@@ -197,13 +247,19 @@ fn configure_text(
 }
 
 #[cfg(feature = "text")]
-fn bootstrap_budget() -> datom_codec::Budget {
+fn budget((nodes, depth): (usize, usize)) -> datom_codec::Budget {
     datom_codec::Budget {
-        remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("signal bound fits budget"),
-        reader: protos::ReaderBudget { remaining: signal::MAXIMUM_SIGNAL_BYTES },
+        remaining: i64::try_from(nodes).expect("validated node budget fits i64"),
+        reader: protos::ReaderBudget { remaining: nodes },
         depth: 0,
-        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH).expect("signal depth fits budget"),
+        maximum_depth: i64::try_from(depth).expect("validated depth budget fits i64"),
     }
+}
+
+fn validated_budget(value: &meta_signal_herdr_nexus::BudgetValue) -> Option<(usize, usize)> {
+    let nodes = usize::try_from(value.node_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES)?;
+    let depth = usize::try_from(value.depth_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH)?;
+    Some((nodes, depth))
 }
 
 #[cfg(feature = "text")]
@@ -882,8 +938,44 @@ mod tests {
             metaflow_name: shared_translator::placement::MetaflowName("test".into()),
             directory: shared_translator::placement::Directory("/tmp".into()),
         };
-        serve_one(&mut server, configuration, &place).expect("isolated request served");
+        serve_one(
+            &mut server,
+            configuration,
+            &place,
+            Endpoint::Meta,
+            herdr_nexus_wire::ValidAdmission {
+                deadline: Duration::from_secs(1),
+                frame_capacity: MAXIMUM_SIGNAL_BYTES,
+            },
+            (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
+        )
+            .expect("isolated request served");
         read_frame(&mut client, MAXIMUM_SIGNAL_BYTES).expect("response frame")
+    }
+
+    #[test]
+    fn meta_lane_is_rejected_on_the_public_endpoint() {
+        use crate::transport::{read_frame, write_frame, Frame};
+        use crate::transport_types::{Kind, Lane};
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame(&mut client, &Frame {
+            lane: Lane::MetaText,
+            kind: Kind::Request,
+            payload: b"Configure.HerdrPath./bin/true".to_vec(),
+        }, MAXIMUM_SIGNAL_BYTES).expect("request frame");
+        let place = Place {
+            metaflow_name: shared_translator::placement::MetaflowName("test".into()),
+            directory: shared_translator::placement::Directory("/tmp".into()),
+        };
+        serve_one(
+            &mut server,
+            &TranslatorConfiguration::default(),
+            &place,
+            Endpoint::Public,
+            herdr_nexus_wire::ValidAdmission { deadline: Duration::from_secs(1), frame_capacity: MAXIMUM_SIGNAL_BYTES },
+            (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
+        ).expect("wrong lane answered");
+        assert_eq!(read_frame(&mut client, MAXIMUM_SIGNAL_BYTES).expect("response").kind, Kind::Failed);
     }
 
     #[test]
@@ -1030,7 +1122,7 @@ mod tests {
             Instant::now().elapsed().as_nanos()
         ));
         fs::create_dir(&directory).expect("temporary directory");
-        let path = directory.join(SOCKET_NAME);
+        let path = directory.join("herdr-translator-test.sock");
         let first = OwnedSocket::bind(path.clone()).expect("first bind");
         assert!(OwnedSocket::bind(path.clone()).is_err());
         assert!(path.exists());

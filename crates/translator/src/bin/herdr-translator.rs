@@ -4,10 +4,12 @@ use std::io;
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stdin = io::stdin();
     let body = stdin.read_frame(FrameCapacity::default())?;
-    let place =
-        Signal::<shared_translator::placement::Place>::from(Vec::<u8>::from(body)).restore()?;
+    let bootstrap = Signal::<herdr_nexus_wire::transport_types::TranslatorBootstrap>::from(
+        Vec::<u8>::from(body),
+    )
+    .restore()?;
     drop(stdin);
     nix::unistd::close(0)?;
-    server::run(&place)?;
+    server::run(&bootstrap)?;
     Ok(())
 }
