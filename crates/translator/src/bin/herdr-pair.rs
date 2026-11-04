@@ -5,6 +5,7 @@ use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
 use nix::unistd::{Pid, Uid};
 use shared_translator::{FrameCapacity, FrameWriting, Signalizable};
+use shared_translator::{PeerIdentity, ProcessId, UserId};
 use std::io::Write;
 use std::process::{Child, Command, Stdio};
 

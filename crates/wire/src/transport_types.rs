@@ -8,29 +8,10 @@ use shared_translator::placement::Place;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct UserId(pub i64);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct GroupId(pub i64);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct ProcessId(pub i64);
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct PeerIdentity {
-    pub user_id: UserId,
-    pub process_id: ProcessId,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Caller {
-    pub user_id: UserId,
-    pub group_id: GroupId,
-    pub process_id: ProcessId,
+    pub user_id: shared_translator::UserId,
+    pub group_id: shared_translator::GroupId,
+    pub process_id: shared_translator::ProcessId,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -98,7 +79,7 @@ pub struct Admission {
 pub struct CoreBootstrap {
     pub place: Place,
     pub admission: Admission,
-    pub peer_identity: PeerIdentity,
+    pub peer_identity: shared_translator::PeerIdentity,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -107,5 +88,5 @@ pub struct TranslatorBootstrap {
     pub place: Place,
     pub admission: Admission,
     pub budget_value: meta_signal_herdr_nexus::BudgetValue,
-    pub peer_identity: PeerIdentity,
+    pub peer_identity: shared_translator::PeerIdentity,
 }

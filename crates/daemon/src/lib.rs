@@ -67,14 +67,14 @@ pub struct Bootstrap {
     public: std::sync::Mutex<Option<OwnedListener>>,
     public_ready: std::sync::Condvar,
     admission: herdr_nexus_wire::ValidAdmission,
-    translator_peer: herdr_nexus_wire::transport_types::PeerIdentity,
+    translator_peer: shared_translator::PeerIdentity,
 }
 
 impl Bootstrap {
     pub fn bind(
         place: &shared_translator::placement::Place,
         admission: herdr_nexus_wire::ValidAdmission,
-        translator_peer: herdr_nexus_wire::transport_types::PeerIdentity,
+        translator_peer: shared_translator::PeerIdentity,
     ) -> std::io::Result<Self> {
         let paths = SocketPaths::from(place);
         let meta = OwnedListener::bind(paths.meta.clone())?;
@@ -165,7 +165,7 @@ impl Bootstrap {
 
 fn require_peer(
     stream: &std::os::unix::net::UnixStream,
-    expected: &herdr_nexus_wire::transport_types::PeerIdentity,
+    expected: &shared_translator::PeerIdentity,
 ) -> std::io::Result<()> {
     let actual = herdr_nexus_wire::frame::peer_caller(stream)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -2141,7 +2141,7 @@ mod tests {
 }
     #[test]
     fn core_accepts_only_the_paired_translator_process() {
-        use herdr_nexus_wire::transport_types::{PeerIdentity, ProcessId, UserId};
+        use shared_translator::{PeerIdentity, ProcessId, UserId};
         let (client, _server) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let actual = herdr_nexus_wire::frame::peer_caller(&client).expect("peer credentials");
         let paired = PeerIdentity {

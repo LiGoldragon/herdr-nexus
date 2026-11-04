@@ -1,9 +1,9 @@
 use datom_codec::Budget;
 use herdr_nexus_translator::registry;
 use herdr_nexus_translator::transport_types::{
-    Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds, PeerIdentity,
-    ProcessId, TranslatorBootstrap, UserId,
+    Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds, TranslatorBootstrap,
 };
+use shared_translator::{PeerIdentity, ProcessId, UserId};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use shared_translator::{FrameCapacity, FrameWriting, Signalizable};
 use std::{env, fs, io};

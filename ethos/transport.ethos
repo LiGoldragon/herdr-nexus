@@ -1,11 +1,7 @@
 Library
-[ shared_translator:[ Place ]                         ; imports
+[ shared_translator:[ Place UserId GroupId ProcessId PeerIdentity ] ; imports
   meta_signal_herdr_nexus:[ BudgetValue ] ]
-[ UserId.Integer                                      ; types
-  GroupId.Integer
-  ProcessId.Integer
-  PeerIdentity.{ UserId ProcessId }
-  Caller.{ UserId GroupId ProcessId }
+[ Caller.{ UserId GroupId ProcessId }                 ; types
   Lane.[ PublicText MetaText EmissionSignal ]
   Kind.[ Request Answered Failed ]
   Failure.String

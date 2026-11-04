@@ -280,12 +280,13 @@ dependencies = [
 [[package]]
 name = "meta-signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=103d086#103d086b6663b3124226c1c6ca0fbe43e8c62180"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=8cfcf6359c8e85800c4e3eb3ae715e66f15ac325#8cfcf6359c8e85800c4e3eb3ae715e66f15ac325"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",
  "rkyv",
  "signal",
+ "translator",
 ]
 
 [[package]]
@@ -575,7 +576,7 @@ dependencies = [
 [[package]]
 name = "translator"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/translator?rev=c38b0529437ae452c7047c6ace920c58e4c1f0fc#c38b0529437ae452c7047c6ace920c58e4c1f0fc"
+source = "git+https://github.com/LiGoldragon/translator?rev=2f1fd07b57921c9ba9d6e0bda342b5e8eb5c1e1a#2f1fd07b57921c9ba9d6e0bda342b5e8eb5c1e1a"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",

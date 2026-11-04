@@ -71,7 +71,7 @@ fn serve_listener(
     place: Place,
     endpoint: Endpoint,
     bootstrap: BootstrapMeta,
-    nexus_peer: herdr_nexus_wire::transport_types::PeerIdentity,
+    nexus_peer: shared_translator::PeerIdentity,
 ) {
     for stream in bound.listener.incoming() {
         let mut stream = match stream {
@@ -124,7 +124,7 @@ fn serve_one_paired(
     place: &Place,
     endpoint: Endpoint,
     bootstrap: BootstrapMeta,
-    nexus_peer: Option<&herdr_nexus_wire::transport_types::PeerIdentity>,
+    nexus_peer: Option<&shared_translator::PeerIdentity>,
 ) -> Result<(), ServerError> {
     use crate::transport::{self, Frame};
     use crate::transport_types::{Kind, Lane};
@@ -756,6 +756,7 @@ fn setting_name(setting: &meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nex
         Set::FrameCapacity(_) => SettingName::FrameCapacity,
         Set::TransportTimeout(_) => SettingName::TransportTimeout,
         Set::SubscriberCapacity(_) => SettingName::SubscriberCapacity,
+        Set::Peer(_) | Set::RemovePeer(_) => SettingName::Peer,
     }
 }
 
@@ -1442,7 +1443,8 @@ mod tests {
     #[test]
     fn same_login_impostor_cannot_submit_an_emission() {
         use crate::transport::{read_frame, write_frame, Frame};
-        use crate::transport_types::{Kind, Lane, PeerIdentity, ProcessId, UserId};
+        use crate::transport_types::{Kind, Lane};
+        use shared_translator::{PeerIdentity, ProcessId, UserId};
         let (mut client, mut server) = UnixStream::pair().expect("socket pair");
         write_frame(
             &mut client,

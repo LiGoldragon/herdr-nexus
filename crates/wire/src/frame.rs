@@ -1,4 +1,5 @@
-use crate::transport_types::{Caller, GroupId, Kind, Lane, ProcessId, UserId};
+use crate::transport_types::{Caller, Kind, Lane};
+use shared_translator::{GroupId, ProcessId, UserId};
 use std::io::{Read, Write};
 
 pub const HEADER_BYTES: usize = 2;
