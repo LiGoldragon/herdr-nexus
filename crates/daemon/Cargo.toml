@@ -7,9 +7,11 @@ publish = false
 
 [dependencies]
 herdr-nexus-core = { path = "../core" }
+emission-herdr-nexus = { path = "../emission" }
 signal-herdr-nexus.workspace = true
 meta-signal-herdr-nexus.workspace = true
 signal = { workspace = true, features = ["transport"] }
+shared-translator.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
