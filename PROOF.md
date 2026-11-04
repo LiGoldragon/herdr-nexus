@@ -45,3 +45,22 @@ An earlier published commit accidentally included local build artifacts:
 `2617a3cd682f62085427cf026c5abe97cece4441`. Commit
 `aad65723f69dbd210937807745f0a6cd768a8539` removed them from the latest tree;
 history was preserved without rewriting the public branch.
+
+The subscription implementation was then rebuilt as
+`/nix/store/35km43qgxsi07jln7wdyj8kr5f9yfl7c-herdr-nexus-v1` and exercised
+against a second owned installed-herdr session. The long-lived CLI delivered
+the acknowledgement before the state changes:
+
+```text
+Subscribe.subaf8fe3
+Subscribed.Done
+Changed.{ { subaf8fe3 w1:p1 }
+          Busy }
+Changed.{ { subaf8fe3 w1:p1 }
+          Idle }
+```
+
+The changes followed a real Prompt through the public Nexus. Public Close
+returned `Closed.Done`, the final List was empty, and cleanup stopped and
+deleted the owned session, processes, and temporary directories. Lock 25037
+was released with a typed `Released` reply.
