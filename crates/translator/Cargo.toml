@@ -17,7 +17,7 @@ rev = "2a6c8883bb9ce1ac9467c359bd323c3aa895d580"
 [dependencies.shared-translator]
 package = "translator"
 git = "https://github.com/LiGoldragon/translator"
-rev = "04f6e6f3408d44a82396d36c5ac59940028466d1"
+rev = "c38b0529437ae452c7047c6ace920c58e4c1f0fc"
 
 
 [features]

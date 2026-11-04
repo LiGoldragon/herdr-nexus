@@ -102,3 +102,4 @@ impl Client {
         match response { Response::Executed(outcome) => Ok(outcome) }
     }
 }
+pub mod server;
