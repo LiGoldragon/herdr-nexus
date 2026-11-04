@@ -28,3 +28,9 @@ fn readiness_is_required_for_start_witness() {
  let json=r#"{"id":"cli:agent:start","result":{"type":"agent_started","agent":{"agent":"codex","agent_status":"idle","interactive_ready":false,"name":"probe","pane_id":"wJ0:p1"},"argv":["codex"],"executable":"codex"}}"#;
  let e=parse_agent_started(json.as_bytes()).unwrap(); assert!(matches!(witness_agent_started(e.result),Err(StartWitnessError::NotReady)));
 }
+
+#[test]
+fn malformed_or_incomplete_json_is_not_success() {
+ assert!(parse_agent_started(br#"{"id":"cli:agent:start","result":{}}"#).is_err());
+ assert!(parse_agent_started(br#"not-json"#).is_err());
+}
