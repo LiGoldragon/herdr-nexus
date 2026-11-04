@@ -29,6 +29,12 @@ a refusal or uncertainty changes no pane to dead. Labels are stored unchanged
 in Memory and joined onto public observations there; external observations do
 not carry labels.
 
+Each public `Known` carries `State` and `Attempt` as separate facts. `State`
+describes the observed pane; `Attempt.Settled` or `Attempt.Uncertain` describes
+the one bounded record of the latest attempt. An uncertain attempt therefore
+does not invent a pane state, and a later successful reconciliation settles
+the attempt independently of the observed state it supplies.
+
 Create is reconciled before it has a pane identity. The launcher gives each
 core process a fresh random `InstanceId`; the core pairs it with a monotonic
 `Sequence` and stores the resulting `PendingCreation` before emitting. The
@@ -94,6 +100,10 @@ decoded only from Herdr's documented stderr error envelope, with no fallback
 between the channels. The bounded runner drains both pipes while retaining at
 most the configured joint output limit. `Subscribe` is routed once into its
 dedicated stream; it has no parallel one-shot fallback.
+
+Every authored Ethos contract has its own deterministic generated-file check.
+The aggregate `generated` check depends on all of those checks; it does not
+stand in for any individual comparison.
 
 ## External state
 

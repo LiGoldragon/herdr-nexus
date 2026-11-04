@@ -231,7 +231,13 @@ fn serve_one_paired(
                 bootstrap.admission.frame_capacity,
             );
         }
-        let response = match forward_public(place, caller, query, progress_timeout) {
+        let response = match forward_public(
+            place,
+            caller,
+            query,
+            progress_timeout,
+            bootstrap.admission.frame_capacity,
+        ) {
             Ok(response) => Frame {
                 lane: Lane::PublicText,
                 kind: Kind::Answered,
@@ -480,7 +486,13 @@ fn configure_text(
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
-            forward_meta(place, caller, core_setting(setting)?, bootstrap.admission.deadline)?
+            forward_meta(
+                place,
+                caller,
+                core_setting(setting)?,
+                bootstrap.admission.deadline,
+                bootstrap.admission.frame_capacity,
+            )?
         }
     };
     Ok(shared_translator::encode(&response))
@@ -545,6 +557,7 @@ fn forward_public(
     caller: crate::transport_types::Caller,
     input: signal_herdr_nexus::Query,
     timeout: Duration,
+    frame_capacity: usize,
 ) -> Result<signal_herdr_nexus::Response, ServerError> {
     let request =
         herdr_nexus_wire::public_call::Query::Call(herdr_nexus_wire::public_call::Call_Data {
@@ -552,9 +565,11 @@ fn forward_public(
             input: herdr_nexus_wire::public_payload::Input(input),
         });
     let response: herdr_nexus_wire::public_call::Response = public_binary_call(
-        Path::new(&place.directory.0).join("herdr.sock"),
+        Path::new(&place.directory.0)
+            .join(herdr_nexus_wire::socket_names().public_nexus_socket.0),
         request,
         timeout,
+        frame_capacity,
     )?;
     match response {
         herdr_nexus_wire::public_call::Response::Answered(output) => Ok(output.0),
@@ -567,7 +582,12 @@ fn forward_public(
 /// Public attempts are bounded by the Nexus's attempt-specific configuration.
 /// CallTimeout bounds request submission and response-frame progress, not the
 /// quiet interval while the Nexus is still performing the attempt.
-fn public_binary_call<Q, R>(path: PathBuf, query: Q, timeout: Duration) -> Result<R, ServerError>
+fn public_binary_call<Q, R>(
+    path: PathBuf,
+    query: Q,
+    timeout: Duration,
+    frame_capacity: usize,
+) -> Result<R, ServerError>
 where
     Q: signal::Signalizable,
     R: rkyv::Archive,
@@ -583,11 +603,11 @@ where
     let request = query
         .signalize()
         .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-    let capacity = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
+    let capacity = FrameCapacity::from(frame_capacity);
     output
         .write_frame(&request, capacity)
         .map_err(ServerError::Frame)?;
-    let response = read_subscription_signal_frame(stream, timeout, MAXIMUM_SIGNAL_BYTES)?
+    let response = read_subscription_signal_frame(stream, timeout, frame_capacity)?
         .ok_or_else(|| ServerError::Signal("Nexus closed without an answer".into()))?;
     Signal::<R>::from(response)
         .restore()
@@ -608,7 +628,10 @@ fn forward_public_stream(
             caller,
             input: herdr_nexus_wire::public_payload::Input(input),
         });
-    let core = UnixStream::connect(Path::new(&place.directory.0).join("herdr.sock"))
+    let core = UnixStream::connect(
+        Path::new(&place.directory.0)
+            .join(herdr_nexus_wire::socket_names().public_nexus_socket.0),
+    )
         .map_err(ServerError::Io)?;
     let mut core_write = herdr_nexus_wire::deadline::DeadlineStream::new(
         core.try_clone().map_err(ServerError::Io)?,
@@ -619,13 +642,13 @@ fn forward_public_stream(
         .signalize()
         .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
     core_write
-        .write_frame(&request, FrameCapacity::from(MAXIMUM_SIGNAL_BYTES))
+        .write_frame(&request, FrameCapacity::from(admission_limit))
         .map_err(ServerError::Frame)?;
     loop {
         let Some(body) = read_subscription_signal_frame(
             core.try_clone().map_err(ServerError::Io)?,
             progress_timeout,
-            MAXIMUM_SIGNAL_BYTES,
+            admission_limit,
         )? else {
             return Ok(());
         };
@@ -694,6 +717,7 @@ fn forward_meta(
     caller: crate::transport_types::Caller,
     input: core_meta_herdr_nexus::CoreSet,
     timeout: Duration,
+    frame_capacity: usize,
 ) -> Result<meta_signal_herdr_nexus::Response, ServerError> {
     let request =
         herdr_nexus_wire::meta_call::Query::Call(herdr_nexus_wire::meta_call::Call_Data {
@@ -706,6 +730,7 @@ fn forward_meta(
         Path::new(&place.directory.0).join(herdr_nexus_wire::socket_names().meta_nexus_socket.0),
         request,
         timeout,
+        frame_capacity,
     )?;
     match response {
         herdr_nexus_wire::meta_call::Response::Answered(output) => match output.0 {
@@ -745,7 +770,12 @@ fn public_setting(setting: core_meta_herdr_nexus::CoreSet) -> meta_signal_herdr_
     }
 }
 
-fn binary_call<Q, R>(path: PathBuf, query: Q, timeout: Duration) -> Result<R, ServerError>
+fn binary_call<Q, R>(
+    path: PathBuf,
+    query: Q,
+    timeout: Duration,
+    frame_capacity: usize,
+) -> Result<R, ServerError>
 where
     Q: signal::Signalizable,
     R: rkyv::Archive,
@@ -758,7 +788,7 @@ where
     let request = query
         .signalize()
         .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-    let capacity = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
+    let capacity = FrameCapacity::from(frame_capacity);
     stream
         .write_frame(&request, capacity)
         .map_err(ServerError::Frame)?;
