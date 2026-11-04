@@ -1,6 +1,6 @@
 use shared_translator::placement::Place;
 use emission_herdr_nexus::{ExternalOutcome, Herdr, Verb};
-use signal_herdr_nexus::{Pane, PaneId, Refusal, ErrorCode, ExitStatus, Message};
+use signal_herdr_nexus::{Pane, PaneId, Refusal, ErrorCode, ExitStatus, Message, State};
 use std::{io::{Read}, os::unix::net::{UnixListener,UnixStream}, process::{Command,Stdio}, thread, time::{Duration,Instant}};
 use shared_translator::{FrameReading,FrameWriting,Restorable,Signal,Signalizable};
 
@@ -33,7 +33,17 @@ fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
  Verb::Keys(d)=>(vec!["pane".into(),"keys".into(),d.pane_id.0.clone()],Some(d.pane_id.0.clone()),"keys"),
  Verb::PaneClose(id)=>(vec!["pane".into(),"close".into(),id.0.clone()],Some(id.0.clone()),"close"),
  Verb::PaneList=>(vec!["pane".into(),"list".into()],None,"list")}}
-fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return ExternalOutcome::Uncertain} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}}
+fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}}
+fn parse_list(value:&serde_json::Value,session:signal_herdr_nexus::Session)->ExternalOutcome {
+ let Some(items)=value.pointer("/result").and_then(|v|v.as_array()) else { return ExternalOutcome::Uncertain };
+ let mut observations=Vec::with_capacity(items.len());
+ for item in items {
+  let Some(id)=item.get("pane_id").and_then(|v|v.as_str()) else { return ExternalOutcome::Uncertain };
+  let state=match item.get("interactive_ready").and_then(|v|v.as_bool()) { Some(true)=>State::Idle, Some(false)=>State::Busy, None=>State::Open };
+  observations.push(emission_herdr_nexus::PaneObservation{pane:Pane{session:session.clone(),pane_id:PaneId(id.into())},state});
+ }
+ ExternalOutcome::Listed(observations)
+}
 fn refused(code:&str,status:Option<i64>,message:String)->ExternalOutcome{ExternalOutcome::Refused(Refusal{error_code:ErrorCode(code.into()),exit_status_option:status.map(ExitStatus),message:Message(message)})}
 struct Output{status:std::process::ExitStatus,stdout:Vec<u8>,stderr:Vec<u8>}
 enum RunError{Io(std::io::Error),Timeout}
