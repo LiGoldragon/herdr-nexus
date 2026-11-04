@@ -1900,3 +1900,22 @@ mod tests {
         assert!(within.is_open());
     }
 }
+    #[test]
+    fn core_accepts_only_the_paired_translator_process() {
+        use herdr_nexus_wire::transport_types::{PeerIdentity, ProcessId, UserId};
+        let (client, _server) = std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let actual = herdr_nexus_wire::frame::peer_caller(&client).expect("peer credentials");
+        let paired = PeerIdentity {
+            user_id: actual.user_id.clone(),
+            process_id: actual.process_id.clone(),
+        };
+        assert!(require_peer(&client, &paired).is_ok());
+        let forged = PeerIdentity {
+            user_id: UserId(actual.user_id.0),
+            process_id: ProcessId(actual.process_id.0 + 1),
+        };
+        assert_eq!(
+            require_peer(&client, &forged).expect_err("unpaired process rejected").kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+    }

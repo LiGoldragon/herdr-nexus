@@ -1,5 +1,9 @@
 # Version 1 proof record
 
+The proofs below are historical boundary witnesses. They predate the current
+per-field meta surface and paired-process launcher; they do not describe the
+current invocation.
+
 On 2026-11-03 the remotely built package
 `/nix/store/anr5nfr8jbkj88ayfhk03xar9v8bz14y-herdr-nexus-v1` drove the
 installed `herdr 0.8.2` through the public and meta sockets. The deployment

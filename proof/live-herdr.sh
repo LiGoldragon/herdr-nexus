@@ -59,11 +59,9 @@ meta="$base/herdr-meta"
 
 start_metaflow() {
   local name=$1
-  "$package/bin/herdr-nexus-place" "$registry" "$name" Core 2000 8388608 |
-    "$package/bin/herdr-nexus-daemon" >"$base/$name-core.log" 2>&1 &
-  pids+=("$!")
-  "$package/bin/herdr-nexus-place" "$registry" "$name" Translator 2000 8388608 1048576 64 |
-    "$package/bin/herdr-translator" >"$base/$name-translator.log" 2>&1 &
+  "$package/bin/herdr-pair" "$registry" "$name" \
+    "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
+    2000 8388608 1048576 64 >"$base/$name-pair.log" 2>&1 &
   pids+=("$!")
   local directory
   directory=$([[ $name == one ]] && printf %s "$one" || printf %s "$two")
@@ -89,6 +87,7 @@ configure() {
   "$meta" "$name" 'Configure.StartTimeout.60000'
   "$meta" "$name" 'Configure.Polling.100'
   "$meta" "$name" 'Configure.FrameCapacity.8388608'
+  "$meta" "$name" 'Configure.SubscriberCapacity.64'
   "$meta" "$name" 'Configure.TransportTimeout.70000' | tee "$base/$name-core-ready.out"
   grep -q Ready "$base/$name-translator-ready.out"
   grep -q Ready "$base/$name-core-ready.out"

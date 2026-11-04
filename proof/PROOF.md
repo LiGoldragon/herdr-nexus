@@ -1,5 +1,33 @@
 # Installed-front Herdr v1 proof
 
+## Paired front proof — 2026-11-04
+
+Remote Nix built `/nix/store/mmi93lyp7r676rbi4skaf4fk2ikm661c-herdr-nexus-v1`.
+`proof/live-herdr.sh` launched two isolated metaflow directories through
+`herdr-pair`. The launcher obtained both child process IDs and supplied each
+child the other child's typed peer identity before closing both bootstrap
+pipes. Each owner accepted its individual settings and reached `Ready`.
+
+Both metaflows created the overlapping external pane ID `w1:p1` without
+crossing directories. The proof then exercised Start, concurrent List,
+Subscribe, a live Polling replacement, Prompt, Press, harness exit while the
+pane remained present, Close, and cleanup of the owned panes, sessions,
+paired processes, sockets, and fixture directory. Its final witness was:
+
+```text
+Started.Done
+Prompted.Done
+Pressed.Done
+Pressed.Done
+Closed.Done
+Closed.Done
+LIVE_HERDR_PROOF_OK
+```
+
+The remote suite additionally rejects an unpaired same-login emission before
+payload decoding and rejects a direct core connection whose kernel process ID
+is not the paired translator.
+
 The rerunnable proof is `proof/live-herdr.sh`. It owns a unique directory,
 two Herdr sessions, two workspaces, their panes, and only the processes it
 starts. Its exit trap closes those resources and prints their identities.

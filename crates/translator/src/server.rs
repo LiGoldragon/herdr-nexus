@@ -1406,6 +1406,50 @@ mod tests {
     }
 
     #[test]
+    fn same_login_impostor_cannot_submit_an_emission() {
+        use crate::transport::{read_frame, write_frame, Frame};
+        use crate::transport_types::{Kind, Lane, PeerIdentity, ProcessId, UserId};
+        let (mut client, mut server) = UnixStream::pair().expect("socket pair");
+        write_frame(
+            &mut client,
+            &Frame {
+                lane: Lane::EmissionSignal,
+                kind: Kind::Request,
+                payload: b"not decoded".to_vec(),
+            },
+            MAXIMUM_SIGNAL_BYTES,
+        )
+        .expect("request frame");
+        let place = Place {
+            metaflow_name: shared_translator::placement::MetaflowName("test".into()),
+            directory: shared_translator::placement::Directory("/tmp".into()),
+        };
+        let expected = PeerIdentity {
+            user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: ProcessId(i64::from(std::process::id()) + 1),
+        };
+        serve_one_paired(
+            &mut server,
+            &TranslatorConfiguration::default(),
+            &place,
+            Endpoint::Public,
+            herdr_nexus_wire::ValidAdmission {
+                deadline: Duration::from_secs(1),
+                frame_capacity: MAXIMUM_SIGNAL_BYTES,
+            },
+            (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
+            Some(&expected),
+        )
+        .expect("impostor receives typed failure");
+        assert_eq!(
+            read_frame(&mut client, MAXIMUM_SIGNAL_BYTES)
+                .expect("response")
+                .kind,
+            Kind::Failed
+        );
+    }
+
+    #[test]
     fn malformed_meta_request_is_failed_and_next_valid_set_is_answered() {
         use crate::transport_types::Kind;
         let configuration = TranslatorConfiguration::default();
