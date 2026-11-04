@@ -548,11 +548,11 @@ impl Dispatcher {
                 let externally_closed = matches!(
                     &external,
                     EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Done)
-                );
+                ) || is_absent_close(&external);
                 if externally_closed {
                     self.publish_closed(&pane);
                 }
-                let outcome = state.core.close(pane.clone(), done_result(external));
+                let outcome = state.core.close(pane.clone(), closed_result(external));
                 if outcome == signal_herdr_nexus::Outcome::Done {
                     state.revisions.remove(&pane);
                 }
@@ -1023,6 +1023,22 @@ fn done_result(outcome: EmissionResult) -> herdr_nexus_core::ExternalResult<()> 
             herdr_nexus_core::ExternalResult::Unavailable(refusal)
         }
         _ => herdr_nexus_core::ExternalResult::Uncertain,
+    }
+}
+
+fn is_absent_close(outcome: &EmissionResult) -> bool {
+    matches!(
+        outcome,
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal))
+            if refusal.error_code.0 == "pane_not_found"
+    )
+}
+
+fn closed_result(outcome: EmissionResult) -> herdr_nexus_core::ExternalResult<()> {
+    if is_absent_close(&outcome) {
+        herdr_nexus_core::ExternalResult::Succeeded(())
+    } else {
+        done_result(outcome)
     }
 }
 
@@ -1657,6 +1673,7 @@ mod tests {
             std::sync::Mutex<std::collections::VecDeque<emission_herdr_nexus::ExternalOutcome>>,
         list_count: std::sync::atomic::AtomicUsize,
         list_start_timeouts: std::sync::Mutex<Vec<Duration>>,
+        close_outcome: std::sync::Mutex<Option<emission_herdr_nexus::ExternalOutcome>>,
     }
 
     impl ExternalEmitter for SubscriptionEmitter {
@@ -1689,6 +1706,12 @@ mod tests {
                             signal_herdr_nexus::State::Open,
                         )])
                     }),
+                Verb::PaneClose(_) => self
+                    .close_outcome
+                    .lock()
+                    .expect("close outcome")
+                    .take()
+                    .unwrap_or(ExternalOutcome::Done),
                 _ => ExternalOutcome::Done,
             })
         }
@@ -1714,6 +1737,7 @@ mod tests {
             listings: std::sync::Mutex::new(listings.into()),
             list_count: std::sync::atomic::AtomicUsize::new(0),
             list_start_timeouts: std::sync::Mutex::new(Vec::new()),
+            close_outcome: std::sync::Mutex::new(None),
         });
         let dispatcher = Arc::new(Dispatcher::with_emitter(&test_paths(), emitter.clone()));
         let configuration = test_configuration();
@@ -1940,6 +1964,79 @@ mod tests {
         dispatcher.subscribe(late_server, pane.session, configuration).expect("late subscribe");
         let _ = read_subscription(&mut late_client);
         assert!(late_client.read_frame(signal::FrameCapacity::from(4096)).is_err());
+    }
+
+    #[test]
+    fn externally_absent_owned_pane_is_released_and_publishes_one_dead() {
+        use emission_herdr_nexus::ExternalOutcome;
+        use signal_herdr_nexus::{
+            ErrorCode, Message, Outcome, Query, Refusal, Response, State,
+        };
+        let (dispatcher, emitter, pane) = started_dispatcher(Vec::new());
+        *emitter.close_outcome.lock().expect("close outcome") = Some(
+            ExternalOutcome::Refused(Refusal {
+                error_code: ErrorCode("pane_not_found".into()),
+                message: Message("pane is already absent".into()),
+                exit_status_option: None,
+            }),
+        );
+        let configuration = test_configuration();
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        client
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .expect("timeout");
+        dispatcher
+            .subscribe(server, pane.session.clone(), Arc::clone(&configuration))
+            .expect("subscribe");
+        let _ = read_subscription(&mut client);
+        let _ = read_subscription(&mut client);
+
+        assert!(matches!(
+            dispatcher.dispatch(Query::Close(pane.clone()), Arc::clone(&configuration)),
+            Response::Closed(Outcome::Done)
+        ));
+        assert!(matches!(
+            read_subscription(&mut client),
+            herdr_nexus_wire::public_call::Response::Answered(ref output)
+                if matches!(&output.0, Response::Changed(change) if change.pane == pane && change.state == State::Dead)
+        ));
+        assert!(matches!(
+            dispatcher.dispatch(Query::List(pane.session), configuration),
+            Response::Listed(Outcome::Listed(ref known)) if known.is_empty()
+        ));
+    }
+
+    #[test]
+    fn another_close_refusal_retains_ownership_and_publishes_no_dead() {
+        use emission_herdr_nexus::ExternalOutcome;
+        use signal_herdr_nexus::{ErrorCode, Message, Outcome, Query, Refusal, Response};
+        let (dispatcher, emitter, pane) = started_dispatcher(Vec::new());
+        *emitter.close_outcome.lock().expect("close outcome") = Some(
+            ExternalOutcome::Refused(Refusal {
+                error_code: ErrorCode("workspace_busy".into()),
+                message: Message("still present".into()),
+                exit_status_option: None,
+            }),
+        );
+        let configuration = test_configuration();
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        client
+            .set_read_timeout(Some(Duration::from_millis(80)))
+            .expect("timeout");
+        dispatcher
+            .subscribe(server, pane.session.clone(), Arc::clone(&configuration))
+            .expect("subscribe");
+        let _ = read_subscription(&mut client);
+        let _ = read_subscription(&mut client);
+
+        assert!(matches!(
+            dispatcher.dispatch(Query::Close(pane.clone()), Arc::clone(&configuration)),
+            Response::Closed(Outcome::Refused(ref refusal)) if refusal.error_code.0 == "workspace_busy"
+        ));
+        assert!(matches!(
+            dispatcher.dispatch(Query::List(pane.session), configuration),
+            Response::Listed(Outcome::Listed(ref known)) if known.len() == 1
+        ));
     }
 
     #[test]
