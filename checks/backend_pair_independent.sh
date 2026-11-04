@@ -180,6 +180,13 @@ assert_no_children() {
   done
 }
 
+assert_admission_closed() {
+  local socket
+  for socket in herdr.sock herdr-meta.sock herdr-translator.sock herdr-meta-translator.sock; do
+    [[ ! -S $runtime/$socket ]]
+  done
+}
+
 # Public surface remains exactly one Place; extra deployment data is private.
 [[ $("$public" 2>&1 || printf ':%s' "$?") == *':64' ]]
 [[ $("$public" '{}' extra 2>&1 || printf ':%s' "$?") == *':64' ]]
@@ -203,6 +210,7 @@ read -r -a positive_children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
 [[ ${#positive_children[@]} -eq 3 ]]
 stop_pair
 assert_no_children "${positive_children[@]}"
+assert_admission_closed
 [[ -f $state/unrelated-state ]]
 [[ -f $config_root/herdr/sessions/unrelated/keep ]]
 [[ ! -e $config_root/herdr/sessions/$positive_name/herdr.sock ]]
@@ -264,14 +272,14 @@ done
 prepare partial
 mkdir -p "$state_root"; touch "$state_root/fail-before-ready"
 launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-[[ ! -S $runtime/herdr.sock && ! -S $runtime/herdr-translator.sock ]]
+assert_admission_closed
 
 # Readiness rejects each exit-zero false report.
 for mode in status-not-running status-malformed status-incompatible status-wrong-socket status-wrong-session; do
   prepare ready-$mode
   mkdir -p "$state_root"; touch "$state_root/$mode"
   launch; wait_exit "$pair_pid"; ! wait "$pair_pid"
-  [[ ! -S $runtime/herdr.sock && ! -S $runtime/herdr-translator.sock ]]
+  assert_admission_closed
 done
 
 # A mismatched configured Herdr executable is a typed refusal, not adoption.
@@ -302,7 +310,7 @@ for role in backend core translator; do
   kill "$target"
   wait_exit "$pair_pid"; ! wait "$pair_pid"
   for child in "${children[@]}"; do wait_exit "$child"; done
-  [[ ! -S $runtime/herdr.sock && ! -S $runtime/herdr-translator.sock ]]
+  assert_admission_closed
 done
 
 # The graceful path and bounded escalation both reap the exact owned backend.
@@ -311,6 +319,7 @@ launch; require_backend_ready
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
 stop_pair
 wait_exit "$backend_pid"
+assert_admission_closed
 
 prepare escalation
 mkdir -p "$state_root"; touch "$state_root/ignore-term"
@@ -318,6 +327,7 @@ launch; require_backend_ready
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
 stop_pair
 wait_exit "$backend_pid"
+assert_admission_closed
 [[ ! -e $runtime/o ]]
 
 echo BACKEND_PAIR_INDEPENDENT_OK
