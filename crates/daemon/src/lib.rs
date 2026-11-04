@@ -300,6 +300,23 @@ pub struct Dispatcher {
     configuration: Arc<ConfigurationStore>,
 }
 
+/// The complete public operation decision: answer once or establish the
+/// dedicated subscription stream. Subscribe has no parallel one-shot path.
+pub enum PublicDispatch {
+    Answered(signal_herdr_nexus::Response),
+    Subscribe(signal_herdr_nexus::Session),
+}
+
+impl PublicDispatch {
+    #[cfg(test)]
+    fn answered(self) -> Option<signal_herdr_nexus::Response> {
+        match self {
+            Self::Answered(response) => Some(response),
+            Self::Subscribe(_) => None,
+        }
+    }
+}
+
 pub trait ExternalEmitter: Send + Sync {
     fn emit(
         &self,
@@ -497,6 +514,7 @@ impl Dispatcher {
         dispatcher
     }
 
+    #[cfg(test)]
     pub fn dispatch(
         &self,
         query: signal_herdr_nexus::Query,
@@ -509,6 +527,8 @@ impl Dispatcher {
             query,
             configuration,
         )
+        .answered()
+        .expect("test helper received a streaming subscription")
     }
 
     pub fn dispatch_as(
@@ -516,13 +536,13 @@ impl Dispatcher {
         principal: shared_translator::Principal,
         query: signal_herdr_nexus::Query,
         configuration: Arc<ReadyCoreConfiguration>,
-    ) -> signal_herdr_nexus::Response {
+    ) -> PublicDispatch {
         use emission_herdr_nexus::{
             AgentPrompt_Data, AgentStart_Data, Herdr, Keys_Data, Verb, WorkspaceCreate_Data,
         };
         use herdr_nexus_core::generated::operation::Operation;
         use signal_herdr_nexus::Response;
-        match operation(query) {
+        let response = match operation(query) {
             Operation::Creating(workspace) => {
                 let creation_id = {
                     let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -531,14 +551,14 @@ impl Dispatcher {
                         sequence: signal_herdr_nexus::Sequence(state.next_creation_sequence),
                     };
                     let Some(next) = state.next_creation_sequence.checked_add(1) else {
-                        return Response::Created(signal_herdr_nexus::Outcome::StoreRefused(
+                        return PublicDispatch::Answered(Response::Created(signal_herdr_nexus::Outcome::StoreRefused(
                             signal_herdr_nexus::StoreRefusal {
                                 memory_refusal: signal_herdr_nexus::MemoryRefusal(
                                     signal_herdr_nexus::Message("creation sequence exhausted".into()),
                                 ),
                                 store_phase: signal_herdr_nexus::StorePhase::BeforeEmission,
                             },
-                        ));
+                        )));
                     };
                     let pending = herdr_nexus_core::generated::memory::PendingCreation {
                         creation_id: creation_id.clone(),
@@ -546,7 +566,7 @@ impl Dispatcher {
                         workspace: workspace.clone(),
                     };
                     if let Err(outcome) = state.core.prepare_creation(pending) {
-                        return Response::Created(outcome);
+                        return PublicDispatch::Answered(Response::Created(outcome));
                     }
                     state.next_creation_sequence = next;
                     creation_id
@@ -573,7 +593,7 @@ impl Dispatcher {
             Operation::Starting(start) => {
                 let reservation = match self.reserve(&principal, &start.pane) {
                     Ok(token) => token,
-                    Err(outcome) => return Response::Started(outcome),
+                    Err(outcome) => return PublicDispatch::Answered(Response::Started(outcome)),
                 };
                 let command = start.command.clone();
                 let external = self.execute(
@@ -603,7 +623,7 @@ impl Dispatcher {
             Operation::Prompting(prompt) => {
                 let reservation = match self.reserve(&principal, &prompt.pane) {
                     Ok(token) => token,
-                    Err(outcome) => return Response::Prompted(outcome),
+                    Err(outcome) => return PublicDispatch::Answered(Response::Prompted(outcome)),
                 };
                 let text = prompt.text.clone();
                 let external = self.execute(
@@ -622,7 +642,7 @@ impl Dispatcher {
             Operation::Pressing(press) => {
                 let reservation = match self.reserve(&principal, &press.pane) {
                     Ok(token) => token,
-                    Err(outcome) => return Response::Pressed(outcome),
+                    Err(outcome) => return PublicDispatch::Answered(Response::Pressed(outcome)),
                 };
                 let keys = press.keys.clone();
                 let external = self.execute(
@@ -641,7 +661,7 @@ impl Dispatcher {
             Operation::Closing(pane) => {
                 let reservation = match self.reserve(&principal, &pane) {
                     Ok(token) => token,
-                    Err(outcome) => return Response::Closed(outcome),
+                    Err(outcome) => return PublicDispatch::Answered(Response::Closed(outcome)),
                 };
                 let external = self.execute(
                     &configuration,
@@ -670,17 +690,17 @@ impl Dispatcher {
                     let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                     let owned = match state.core.owned_in_session(&session) {
                         Ok(owned) => owned,
-                        Err(outcome) => return Response::Listed(outcome),
+                        Err(outcome) => return PublicDispatch::Answered(Response::Listed(outcome)),
                     };
                     let pending = match state.core.pending_in_session(&session) {
                         Ok(pending) => pending,
-                        Err(outcome) => return Response::Listed(outcome),
+                        Err(outcome) => return PublicDispatch::Answered(Response::Listed(outcome)),
                     };
                     let owns_any = owned.iter().any(|owned| {
                         state.principals.get(&owned.pane) == Some(&principal)
                     }) || pending.iter().any(|creation| creation.principal == principal);
                     if !owns_any {
-                        return Response::Listed(signal_herdr_nexus::Outcome::Listed(Vec::new()));
+                        return PublicDispatch::Answered(Response::Listed(signal_herdr_nexus::Outcome::Listed(Vec::new())));
                     }
                     (state.revisions.clone(), pending)
                 };
@@ -733,15 +753,9 @@ impl Dispatcher {
                 }
                 Response::Listed(outcome)
             }
-            Operation::Subscribing(session) => {
-                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                Response::Subscribed(
-                    state
-                        .core
-                        .subscribe(session, herdr_nexus_core::ExternalResult::Uncertain),
-                )
-            }
-        }
+            Operation::Subscribing(session) => return PublicDispatch::Subscribe(session),
+        };
+        PublicDispatch::Answered(response)
     }
 
     fn reserve(&self, principal: &shared_translator::Principal, pane: &signal_herdr_nexus::Pane) -> Result<u64, signal_herdr_nexus::Outcome> {
@@ -945,7 +959,14 @@ impl Dispatcher {
                     return;
                 }
             }
-            let response = self.dispatch_as(principal.clone(), Query::List(session.clone()), Arc::clone(&configuration));
+            let response = match self.dispatch_as(
+                principal.clone(),
+                Query::List(session.clone()),
+                Arc::clone(&configuration),
+            ) {
+                PublicDispatch::Answered(response) => response,
+                PublicDispatch::Subscribe(_) => return,
+            };
             let complete = matches!(response, Response::Listed(Outcome::Listed(_)));
             // Hold Memory stable through publication. Close uses the same
             // state-before-hub order, so an older poll can never reopen a
@@ -1537,7 +1558,10 @@ impl ConfigurationStore {
                     .is_some(),
             ),
             core_meta_herdr_nexus::CoreSet::Peer(_)
-            | core_meta_herdr_nexus::CoreSet::RemovePeer(_) => unreachable!("peer settings returned above"),
+            | core_meta_herdr_nexus::CoreSet::RemovePeer(_) => (
+                SettingName::Peer,
+                false,
+            ),
         };
         if !valid {
             return Response::ConfigureRefused(ConfigurationRefusal::Invalid(Invalid_Data {
@@ -1639,7 +1663,17 @@ impl ConfigurationStore {
                 }
                 self.close_peer_subscriptions(&applied);
             }
-            _ => unreachable!("only peer settings reach configure_peer"),
+            _ => {
+                return Response::ConfigureRefused(ConfigurationRefusal::Invalid(
+                    meta_signal_herdr_nexus::Invalid_Data {
+                        owner: meta_signal_herdr_nexus::Owner::Nexus,
+                        setting_name: meta_signal_herdr_nexus::SettingName::Peer,
+                        message: meta_signal_herdr_nexus::Message(
+                            "a non-peer setting reached peer configuration".into(),
+                        ),
+                    },
+                ))
+            }
         }
         let ready = self.current.read().unwrap_or_else(|p| p.into_inner());
         Response::Configured(core_meta_herdr_nexus::Configured_Data {
@@ -2455,12 +2489,13 @@ mod tests {
                 other.clone(),
                 Query::List(pane.session.clone()),
                 test_configuration(),
-            ),
+            ).answered().expect("List is answered"),
             Response::Listed(Outcome::Listed(Vec::new()))
         );
         let before = emitter.list_count.load(std::sync::atomic::Ordering::SeqCst);
         assert_eq!(
-            dispatcher.dispatch_as(other, Query::Close(pane.clone()), test_configuration()),
+            dispatcher.dispatch_as(other, Query::Close(pane.clone()), test_configuration())
+                .answered().expect("Close is answered"),
             Response::Closed(Outcome::Unknown(pane))
         );
         assert_eq!(

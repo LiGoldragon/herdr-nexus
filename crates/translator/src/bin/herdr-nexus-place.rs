@@ -1,5 +1,4 @@
-use datom_codec::Budget;
-use herdr_nexus_translator::registry;
+use herdr_nexus_translator::{maximum_text_budget, registry};
 use herdr_nexus_translator::transport_types::{
     Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds,
     RetryDelayMilliseconds, TranslatorBootstrap,
@@ -8,15 +7,6 @@ use shared_translator::{PeerIdentity, ProcessId, UserId};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use shared_translator::{FrameCapacity, FrameWriting, Signalizable};
 use std::{env, fs, io};
-
-fn budget() -> Budget {
-    Budget {
-        remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("signal bound fits budget"),
-        reader: protos::ReaderBudget { remaining: signal::MAXIMUM_SIGNAL_BYTES },
-        depth: 0,
-        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH).expect("signal depth fits budget"),
-    }
-}
 
 fn integer(value: Option<String>, name: &str) -> Result<i64, Box<dyn std::error::Error>> {
     value.ok_or_else(|| name.to_owned())?.parse().map_err(Into::into)
@@ -38,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     herdr_nexus_wire::ValidAdmission::try_from(&admission)
         .map_err(|message| format!("invalid admission: {message}"))?;
-    let registry = registry::decode(&fs::read_to_string(registry_path)?, &mut budget())
+    let registry = registry::decode(&fs::read_to_string(registry_path)?, &mut maximum_text_budget())
         .map_err(|error| format!("{error:?}"))?;
     let place = registry::select(&registry, &name).map_err(|error| format!("{error:?}"))?.clone();
     let mut output = io::stdout();

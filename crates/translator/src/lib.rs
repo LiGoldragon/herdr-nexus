@@ -110,3 +110,20 @@ impl std::error::Error for ClientError {}
 
 #[cfg(feature = "text")]
 pub use shared_translator::{placement, registry};
+
+/// The one construction of a textualization budget used by every translator
+/// entry point and request decoder.
+#[cfg(feature = "text")]
+pub fn text_budget(nodes: usize, depth: usize) -> datom_codec::Budget {
+    datom_codec::Budget {
+        remaining: i64::try_from(nodes).expect("validated text nodes fit i64"),
+        reader: protos::ReaderBudget { remaining: nodes },
+        depth: 0,
+        maximum_depth: i64::try_from(depth).expect("validated text depth fits i64"),
+    }
+}
+
+#[cfg(feature = "text")]
+pub fn maximum_text_budget() -> datom_codec::Budget {
+    text_budget(signal::MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH)
+}

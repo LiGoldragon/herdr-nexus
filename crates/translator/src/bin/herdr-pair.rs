@@ -1,5 +1,4 @@
-use datom_codec::Budget;
-use herdr_nexus_translator::{registry, transport_types::*};
+use herdr_nexus_translator::{maximum_text_budget, registry, transport_types::*};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
@@ -28,18 +27,6 @@ fn fresh_instance_id() -> Result<signal_herdr_nexus::InstanceId, Box<dyn std::er
         write!(&mut identifier, "{byte:02x}")?;
     }
     Ok(signal_herdr_nexus::InstanceId(identifier))
-}
-
-fn text_budget() -> Budget {
-    Budget {
-        remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("wire maximum fits i64"),
-        reader: protos::ReaderBudget {
-            remaining: signal::MAXIMUM_SIGNAL_BYTES,
-        },
-        depth: 0,
-        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH)
-            .expect("wire depth fits i64"),
-    }
 }
 
 fn integer(value: Option<String>, name: &str) -> Result<i64, Box<dyn std::error::Error>> {
@@ -82,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("unexpected launcher argument".into());
     }
     let registry_text = std::fs::read_to_string(registry_path)?;
-    let registry = registry::decode(&registry_text, &mut text_budget())
+    let registry = registry::decode(&registry_text, &mut maximum_text_budget())
         .map_err(|error| format!("{error:?}"))?;
     let place = registry::select(&registry, &name)
         .map_err(|error| format!("{error:?}"))?

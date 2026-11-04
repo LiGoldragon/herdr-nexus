@@ -62,11 +62,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let actual = herdr_nexus_wire::frame::peer_caller(&stream)?;
                 let peer_grant = authority.peer_grant();
                 let principal = herdr_nexus_daemon::principal_for(&authority, &actual, &call.caller)?;
-                let query = call.input.0;
-                if let signal_herdr_nexus::Query::Subscribe(session) = query {
-                    return dispatcher.subscribe_bound(stream, principal, peer_grant, session, configuration);
-                }
-                let response = dispatcher.dispatch_as(principal, query, Arc::clone(&configuration));
+                let response = match dispatcher.dispatch_as(
+                    principal.clone(),
+                    call.input.0,
+                    Arc::clone(&configuration),
+                ) {
+                    herdr_nexus_daemon::PublicDispatch::Subscribe(session) => {
+                        return dispatcher.subscribe_bound(
+                            stream,
+                            principal,
+                            peer_grant,
+                            session,
+                            configuration,
+                        )
+                    }
+                    herdr_nexus_daemon::PublicDispatch::Answered(response) => response,
+                };
                 let response = herdr_nexus_wire::public_call::Response::Answered(
                     herdr_nexus_wire::public_payload::Output(response),
                 );

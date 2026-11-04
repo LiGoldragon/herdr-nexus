@@ -19,7 +19,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-const MAXIMUM_SIGNAL_BYTES: usize = 8 * 1024 * 1024;
+const MAXIMUM_SIGNAL_BYTES: usize = signal::MAXIMUM_SIGNAL_BYTES;
 
 #[derive(Clone, Copy)]
 pub enum Endpoint {
@@ -296,9 +296,7 @@ fn serve_one_paired(
                     payload: response.into_bytes(),
                 }
             }
-            Lane::PublicText => {
-                unreachable!("public text is handled as a potentially streaming request above")
-            }
+            Lane::PublicText => return Err(ServerError::Transport(herdr_nexus_wire::frame::TransportError::WrongLane)),
         })
     })();
     let response = match response {
@@ -370,7 +368,7 @@ impl ReadyTranslatorConfiguration {
 
     #[cfg(feature = "text")]
     fn text_budget(&self) -> datom_codec::Budget {
-        budget(self.text_budget)
+        crate::text_budget(self.text_budget.0, self.text_budget.1)
     }
 }
 
@@ -480,7 +478,7 @@ fn configure_text(
     bootstrap: BootstrapMeta,
 ) -> Result<String, ServerError> {
     use datom_codec::{Actualizing, Potential};
-    let mut budget = budget(bootstrap.text_budget);
+    let mut budget = crate::text_budget(bootstrap.text_budget.0, bootstrap.text_budget.1);
     let mut potential = Potential::<meta_signal_herdr_nexus::Query>::from(text);
     let query = potential
         .actualize(&mut budget)
@@ -492,20 +490,10 @@ fn configure_text(
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
-            forward_meta(place, caller, core_setting(setting), bootstrap.admission.deadline)?
+            forward_meta(place, caller, core_setting(setting)?, bootstrap.admission.deadline)?
         }
     };
     Ok(shared_translator::encode(&response))
-}
-
-#[cfg(feature = "text")]
-fn budget((nodes, depth): (usize, usize)) -> datom_codec::Budget {
-    datom_codec::Budget {
-        remaining: i64::try_from(nodes).expect("validated node budget fits i64"),
-        reader: protos::ReaderBudget { remaining: nodes },
-        depth: 0,
-        maximum_depth: i64::try_from(depth).expect("validated depth budget fits i64"),
-    }
 }
 
 fn validated_budget(value: &meta_signal_herdr_nexus::BudgetValue) -> Option<(usize, usize)> {
@@ -530,8 +518,8 @@ fn decode_public(
         .map_err(|error| ServerError::Signal(format!("{error:?}")))
 }
 
-fn core_setting(setting: meta_signal_herdr_nexus::Set) -> core_meta_herdr_nexus::CoreSet {
-    match setting {
+fn core_setting(setting: meta_signal_herdr_nexus::Set) -> Result<core_meta_herdr_nexus::CoreSet, ServerError> {
+    Ok(match setting {
         meta_signal_herdr_nexus::Set::StartTimeout(value) => {
             core_meta_herdr_nexus::CoreSet::StartTimeout(value)
         }
@@ -557,9 +545,9 @@ fn core_setting(setting: meta_signal_herdr_nexus::Set) -> core_meta_herdr_nexus:
         | meta_signal_herdr_nexus::Set::CallTimeout(_)
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_) => {
-            unreachable!("translator settings are handled before core conversion")
+            return Err(ServerError::Signal("translator setting cannot be forwarded to the Nexus".into()))
         }
-    }
+    })
 }
 
 fn forward_public(
@@ -691,7 +679,7 @@ fn read_subscription_signal_frame(
     match stream.read(&mut prefix[..1]) {
         Ok(0) => return Ok(None),
         Ok(1) => {}
-        Ok(_) => unreachable!("a one-byte buffer yields at most one byte"),
+        Ok(_) => return Err(ServerError::Signal("subscription prefix read exceeded its one-byte buffer".into())),
         Err(error) => return Err(ServerError::Io(error)),
     }
     let mut progressing = herdr_nexus_wire::deadline::DeadlineStream::new(stream, progress_timeout)
@@ -725,7 +713,7 @@ fn forward_meta(
             )),
         });
     let response: herdr_nexus_wire::meta_call::Response = binary_call(
-        Path::new(&place.directory.0).join("herdr-meta.sock"),
+        Path::new(&place.directory.0).join(herdr_nexus_wire::socket_names().meta_nexus_socket.0),
         request,
         timeout,
     )?;
@@ -1736,7 +1724,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir(&directory).expect("fixture directory");
         let core_path = directory.join("herdr.sock");
-        let front_path = directory.join("herdr-translator.sock");
+        let front_path = directory.join(
+            herdr_nexus_wire::socket_names()
+                .public_translator_socket
+                .0,
+        );
         let core_listener = UnixListener::bind(&core_path).expect("core fixture socket");
         let front_listener = UnixListener::bind(&front_path).expect("front fixture socket");
 

@@ -9,6 +9,7 @@ use signal_herdr_nexus::{
     Text, Value, Variable,
 };
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,18 +31,23 @@ impl Fixture {
         ));
         fs::create_dir(&directory).expect("create fixture directory");
         let executable = directory.join("herdr-fixture");
+        let incomplete = directory.join("herdr-fixture.incomplete");
         let record = directory.join("arguments");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\n{}\n",
             record.display(),
             body
         );
-        fs::write(&executable, script).expect("write fixture");
-        let mut permissions = fs::metadata(&executable)
+        let mut writer = fs::File::create(&incomplete).expect("create fixture writer");
+        writer.write_all(script.as_bytes()).expect("write fixture");
+        writer.sync_all().expect("sync fixture");
+        drop(writer);
+        let mut permissions = fs::metadata(&incomplete)
             .expect("fixture metadata")
             .permissions();
         permissions.set_mode(0o700);
-        fs::set_permissions(&executable, permissions).expect("make fixture executable");
+        fs::set_permissions(&incomplete, permissions).expect("make fixture executable");
+        fs::rename(&incomplete, &executable).expect("publish closed fixture executable");
         Self {
             directory,
             executable,

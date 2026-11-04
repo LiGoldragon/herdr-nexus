@@ -89,7 +89,7 @@ pub fn read_frame_after_idle(
     match stream.read(&mut prefix[..1]) {
         Ok(0) => return Ok(None),
         Ok(1) => {}
-        Ok(_) => unreachable!("a one-byte buffer yields at most one byte"),
+        Ok(_) => return Err(TransportError::InvalidLength),
         Err(error) => return Err(TransportError::Io(error)),
     }
     let mut progressing = crate::deadline::DeadlineStream::new(stream, progress_timeout)?;

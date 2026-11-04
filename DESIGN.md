@@ -58,7 +58,8 @@ separate. Internal failures never receive invented exit codes.
 
 The Nexus and translator each own a partial configuration. One flat typed
 `Set` validates and applies one field; refusal preserves the previous partial
-snapshot. The Nexus owns start, polling, frame-capacity and transport limits.
+snapshot. The Nexus owns start, polling, frame-capacity, transport and
+subscriber-queue limits.
 The translator owns the herdr path, call timeout, output limit and text budget.
 Each process reports the fields it still awaits and becomes ready only when
 all of its fields are present and their cross-field constraints hold. Defaults
@@ -84,12 +85,15 @@ checks the peer UID at the same-login boundary.
 
 ## External calls
 
-Each external command implements `Arguable` on its own concrete argument type;
-the invocation composes those implementations with the one session prefix.
+Each external command bears the checked `Arguable` trait on its own concrete
+argument type. The one typed execution path composes that capability with the
+one session prefix and decodes through the same concrete command type; there
+is no parallel invocation or decoder selection table.
 Successful Herdr JSON is decoded only from stdout. A nonzero process result is
 decoded only from Herdr's documented stderr error envelope, with no fallback
 between the channels. The bounded runner drains both pipes while retaining at
-most the configured joint output limit.
+most the configured joint output limit. `Subscribe` is routed once into its
+dedicated stream; it has no parallel one-shot fallback.
 
 ## External state
 
