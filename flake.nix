@@ -40,7 +40,7 @@
           version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
-          cargoExtraArgs = "-p herdr-nexus-translator --bin herdr-translator --no-default-features";
+          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-translator";
         };
         cli = rust.craneLib.buildPackage {
           pname = "herdr-nexus-cli";
