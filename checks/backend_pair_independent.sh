@@ -115,6 +115,27 @@ wait_exit() {
   return 1
 }
 
+process_starttime() {
+  local pid=$1 record
+  record=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  awk '{ print $22 }' <<<"$record"
+}
+
+wait_exact_exit() {
+  local pid=$1 expected_starttime=$2 record state actual_starttime
+  for _ in $(seq 1 300); do
+    record=$(cat "/proc/$pid/stat" 2>/dev/null) || return 0
+    state=$(awk '{ print $3 }' <<<"$record")
+    actual_starttime=$(awk '{ print $22 }' <<<"$record")
+    [[ $state == Z || $actual_starttime != "$expected_starttime" ]] && return 0
+    sleep .02
+  done
+  echo "exact process $pid starttime=$expected_starttime did not exit" >&2
+  sed -n '/^Name:/p;/^State:/p;/^Pid:/p;/^PPid:/p;/^Uid:/p' "/proc/$pid/status" >&2 || true
+  echo "EXE=$(readlink "/proc/$pid/exe" 2>/dev/null) STAT=$(cat "/proc/$pid/stat" 2>/dev/null)" >&2
+  return 1
+}
+
 wait_backend() {
   local session; session=$(session_name)
   for _ in $(seq 1 300); do
@@ -329,16 +350,18 @@ done
 prepare graceful
 launch; require_backend_ready
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+backend_starttime=$(process_starttime "$backend_pid")
 stop_pair
-wait_exit "$backend_pid"
+wait_exact_exit "$backend_pid" "$backend_starttime"
 assert_admission_closed
 
 prepare escalation
 mkdir -p "$state_root"; touch "$state_root/ignore-term"
 launch; require_backend_ready
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+backend_starttime=$(process_starttime "$backend_pid")
 stop_pair
-wait_exit "$backend_pid"
+wait_exact_exit "$backend_pid" "$backend_starttime"
 assert_admission_closed
 [[ ! -e $runtime/o ]]
 
