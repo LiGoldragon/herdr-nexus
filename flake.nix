@@ -8,9 +8,10 @@
       url = "github:LiGoldragon/rust-build";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    ethos-zero.url = "github:LiGoldragon/ethos-zero/b8052c2404374265dfcddbde83fef76977f78acd";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-build }:
+  outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
@@ -53,12 +54,24 @@
           paths = [ daemon translator cli ];
         };
         };
-        checks.test = rust.craneLib.cargoTest {
-          pname = "herdr-nexus-test";
-          version = "0.1.0";
-          src = source;
-          inherit cargoArtifacts;
-          cargoTestExtraArgs = "--workspace --all-features";
+        checks = {
+          test = rust.craneLib.cargoTest {
+            pname = "herdr-nexus-test";
+            version = "0.1.0";
+            src = source;
+            inherit cargoArtifacts;
+            cargoTestExtraArgs = "--workspace --all-features";
+          };
+          operation-generated = pkgs.runCommand "herdr-operation-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/operation.ethos;
+            committed = ./crates/core/src/generated/operation.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
+          emission-generated = pkgs.runCommand "herdr-emission-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/emission.ethos;
+            committed = ./crates/emission/src/generated/emission.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust.toolchain ];

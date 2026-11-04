@@ -257,8 +257,12 @@ struct SubscriptionHub {
 
 struct SessionSubscription {
     generation: u64,
-    previous: std::collections::HashMap<signal_herdr_nexus::Pane, signal_herdr_nexus::State>,
-    subscribers: Vec<std::os::unix::net::UnixStream>,
+    subscribers: Vec<Subscriber>,
+}
+
+struct Subscriber {
+    stream: std::os::unix::net::UnixStream,
+    delivered: std::collections::HashMap<signal_herdr_nexus::Pane, signal_herdr_nexus::State>,
 }
 
 fn operation(
@@ -543,7 +547,10 @@ impl Dispatcher {
             )?;
         }
         if let Some(existing) = hub.sessions.get_mut(&session) {
-            existing.subscribers.push(stream);
+            existing.subscribers.push(Subscriber {
+                stream,
+                delivered: current,
+            });
             return Ok(());
         }
         let generation = self
@@ -553,8 +560,10 @@ impl Dispatcher {
             session.clone(),
             SessionSubscription {
                 generation,
-                previous: current,
-                subscribers: vec![stream],
+                subscribers: vec![Subscriber {
+                    stream,
+                    delivered: current,
+                }],
             },
         );
         drop(hub);
@@ -593,7 +602,9 @@ impl Dispatcher {
                 if subscription.generation != generation {
                     return;
                 }
-                subscription.subscribers.retain(subscriber_connected);
+                subscription
+                    .subscribers
+                    .retain(|subscriber| subscriber_connected(&subscriber.stream));
                 if subscription.subscribers.is_empty() {
                     hub.sessions.remove(&session);
                     return;
@@ -620,22 +631,25 @@ impl Dispatcher {
                 return;
             }
             if let Some(current) = complete {
-                let changes = current
-                    .iter()
-                    .filter(|(pane, state)| subscription.previous.get(*pane) != Some(*state))
-                    .map(|(pane, state)| {
-                        Response::Changed(Changed_Data {
-                            pane: pane.clone(),
-                            state: state.clone(),
+                subscription.subscribers.retain_mut(|subscriber| {
+                    let changes = current
+                        .iter()
+                        .filter(|(pane, state)| subscriber.delivered.get(*pane) != Some(*state))
+                        .map(|(pane, state)| {
+                            Response::Changed(Changed_Data {
+                                pane: pane.clone(),
+                                state: state.clone(),
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>();
-                for change in changes {
-                    subscription.subscribers.retain_mut(|stream| {
-                        write_subscription_change(stream, &configuration, &change).is_ok()
+                        .collect::<Vec<_>>();
+                    let delivered = changes.iter().all(|change| {
+                        write_subscription_change(&subscriber.stream, &configuration, change).is_ok()
                     });
-                }
-                subscription.previous = current;
+                    if delivered {
+                        subscriber.delivered = current.clone();
+                    }
+                    delivered
+                });
             }
             if subscription.subscribers.is_empty() {
                 hub.sessions.remove(&session);
@@ -1421,5 +1435,50 @@ mod tests {
             (1..=5).contains(&polls),
             "one shared source should poll at one cadence, got {polls}"
         );
+    }
+
+    #[test]
+    fn late_subscriber_cursor_does_not_repeat_its_current_state() {
+        use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
+        use signal_herdr_nexus::{AgentKind, AgentName, Command, Executable, Label, Program, Query, Start_Data};
+        let pane = pane_for("subscription", "pane");
+        let (dispatcher, _emitter, _) = started_dispatcher(vec![
+            ExternalOutcome::Listed(vec![PaneObservation { pane: pane.clone(), state: signal_herdr_nexus::State::Idle }]),
+            ExternalOutcome::Listed(vec![PaneObservation { pane: pane.clone(), state: signal_herdr_nexus::State::Busy }]),
+        ]);
+        let slow = Arc::new(RuntimeConfiguration {
+            polling: Duration::from_millis(100),
+            start_timeout: Duration::from_millis(20),
+            frame_capacity_bytes: 4096,
+            transport_timeout: Duration::from_millis(30),
+        });
+        *dispatcher.configuration.current.write().expect("configuration") = Some(Arc::clone(&slow));
+        let (server_a, mut client_a) = std::os::unix::net::UnixStream::pair().expect("pair a");
+        client_a.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout a");
+        dispatcher.subscribe(server_a, pane.session.clone(), Arc::clone(&slow)).expect("subscribe a");
+        let _ = read_subscription(&mut client_a); // acknowledgement
+        let _ = read_subscription(&mut client_a); // current Busy
+        assert!(matches!(read_subscription(&mut client_a), herdr_nexus_wire::public_call::Response::Answered(ref output) if matches!(&output.0, signal_herdr_nexus::Response::Changed(change) if change.state == signal_herdr_nexus::State::Idle)));
+
+        let started = dispatcher.dispatch(Query::Start(Start_Data {
+            pane: pane.clone(),
+            command: Command {
+                agent_name: AgentName("probe".into()),
+                agent_kind: AgentKind::Codex,
+                executable: Executable::Explicit(Program("/bin/true".into())),
+                string_vector: Vec::new(),
+            },
+            label: Label("flow".into()),
+        }), Arc::clone(&slow));
+        assert!(matches!(started, signal_herdr_nexus::Response::Started(signal_herdr_nexus::Outcome::Done)));
+        let (server_b, mut client_b) = std::os::unix::net::UnixStream::pair().expect("pair b");
+        client_b.set_read_timeout(Some(Duration::from_millis(300))).expect("timeout b");
+        dispatcher.subscribe(server_b, pane.session.clone(), Arc::clone(&slow)).expect("subscribe b");
+        let _ = read_subscription(&mut client_b); // acknowledgement
+        assert!(matches!(read_subscription(&mut client_b), herdr_nexus_wire::public_call::Response::Answered(ref output) if matches!(&output.0, signal_herdr_nexus::Response::Changed(change) if change.state == signal_herdr_nexus::State::Busy)));
+        assert!(matches!(read_subscription(&mut client_a), herdr_nexus_wire::public_call::Response::Answered(ref output) if matches!(&output.0, signal_herdr_nexus::Response::Changed(change) if change.state == signal_herdr_nexus::State::Busy)));
+        client_b.set_read_timeout(Some(Duration::from_millis(35))).expect("short timeout b");
+        use signal::FrameReading;
+        assert!(client_b.read_frame(signal::FrameCapacity::from(4096)).is_err(), "late subscriber must not receive its current Busy twice");
     }
 }
