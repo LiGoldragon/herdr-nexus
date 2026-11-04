@@ -123,13 +123,19 @@ impl Bootstrap {
             &self.meta.listener,
             self.admission.retry_delay,
         )?;
-        require_peer(&stream, &self.translator_peer)?;
-        let mut stream = DeadlineStream::new(stream, self.admission.deadline)?;
-        serve_meta_once(
-            &mut stream,
-            signal::FrameCapacity::from(self.admission.frame_capacity),
-            |candidate| self.configure(candidate),
-        )
+        let exchange = (|| -> Result<(), Box<dyn std::error::Error>> {
+            require_peer(&stream, &self.translator_peer)?;
+            let mut stream = DeadlineStream::new(stream, self.admission.deadline)?;
+            serve_meta_once(
+                &mut stream,
+                signal::FrameCapacity::from(self.admission.frame_capacity),
+                |candidate| self.configure(candidate),
+            )
+        })();
+        if let Err(error) = exchange {
+            eprintln!("herdr Nexus meta connection failed: {error}");
+        }
+        Ok(())
     }
 
     pub fn accept_public(&self) -> std::io::Result<AcceptedPublic> {
@@ -151,8 +157,13 @@ impl Bootstrap {
                 .listener,
                 self.admission.retry_delay,
             )?.0;
-            let actual = herdr_nexus_wire::frame::peer_caller(&stream)
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let actual = match herdr_nexus_wire::frame::peer_caller(&stream) {
+                Ok(actual) => actual,
+                Err(error) => {
+                    eprintln!("herdr Nexus public peer lookup failed: {error}");
+                    continue;
+                }
+            };
             if self.translator_peer.matches(&actual) {
                 return Ok(AcceptedPublic { stream, authority: PublicAuthority::Translator });
             }

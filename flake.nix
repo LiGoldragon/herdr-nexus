@@ -140,6 +140,14 @@
             ${pkgs.bash}/bin/bash "$script" "$package"
             touch "$out"
           '';
+          meta-connection-isolation = pkgs.runCommand "herdr-meta-connection-isolation" {
+            package = self.packages.${system}.default;
+            script = ./checks/meta-connection-isolation.sh;
+            nativeBuildInputs = [ pkgs.python3 ];
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$package"
+            touch "$out"
+          '';
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust.toolchain ];
