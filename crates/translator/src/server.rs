@@ -21,7 +21,8 @@ pub fn serve_one(stream:&mut UnixStream)->Result<(),ServerError>{
 use shared_translator::FrameCapacity as SharedCapacity;
 fn execute(config:meta_signal_herdr_nexus::Configuration, herdr:Herdr)->ExternalOutcome{
  let timeout=Duration::from_millis(config.call_timeout_milliseconds.0.max(1) as u64);
- let (argv,pane,kind)=argv_for(&herdr);
+ let (mut argv,pane,kind)=argv_for(&herdr);
+ argv.splice(0..0, ["--session".into(), herdr.session.0.clone()]);
  let output=match run_command(&config.herdr_executable.0,&argv,timeout){Ok(v)=>v,Err(RunError::Timeout)=>return ExternalOutcome::Uncertain,Err(RunError::Io(e))=>return refused("process_io",None,e.to_string())};
  if !output.status.success(){return refused("process_refused",Some(output.status.code().unwrap_or(-1) as i64),String::from_utf8_lossy(&output.stderr).into_owned());}
  parse_success(&output.stdout,kind,pane,herdr.session)
@@ -56,3 +57,5 @@ fn run_command(program:&str,args:&[String],timeout:Duration)->Result<Output,RunE
 
 impl std::fmt::Display for ServerError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
 impl std::error::Error for ServerError {}
+#[cfg(test)]
+mod tests { use super::*; #[test] fn list_object_maps_complete_panes(){let j=br#"{"result":{"type":"pane_list","panes":[{"pane_id":"w:p","interactive_ready":true}]}}"#; match parse_success(j,"list",None,signal_herdr_nexus::Session("s".into())){ExternalOutcome::Listed(v)=>assert_eq!(v.len(),1),x=>panic!("unexpected {x:?}")} } #[test] fn list_partial_is_uncertain(){let j=br#"{"result":{"type":"pane_list"}}"#; assert!(matches!(parse_success(j,"list",None,signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain));} #[test] fn prompt_wrong_result_not_done(){let j=br#"{"result":{"type":"other"}}"#; assert!(matches!(parse_success(j,"prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain));} }
