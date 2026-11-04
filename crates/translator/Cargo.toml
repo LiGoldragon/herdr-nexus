@@ -24,3 +24,11 @@ rev = "04f6e6f3408d44a82396d36c5ac59940028466d1"
 default = []
 text = ["dep:protos", "dep:datom-codec", "signal-herdr-nexus/datom", "shared-translator/text"]
 
+
+[dependencies.emission-herdr-nexus]
+path = "../emission"
+
+[dependencies.meta-signal-herdr-nexus]
+package = "meta-signal-herdr-nexus"
+git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
+rev = "aae557db87788dbf572e6b9244d8107dedaf76aa"
