@@ -13,6 +13,8 @@ pub enum CoreSet {
     FrameCapacity(meta_signal_herdr_nexus::ByteLimit),
     TransportTimeout(meta_signal_herdr_nexus::Timeout),
     SubscriberCapacity(i64),
+    Peer(translator::PeerBinding),
+    RemovePeer(translator::PeerId),
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

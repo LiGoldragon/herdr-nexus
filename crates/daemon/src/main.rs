@@ -33,13 +33,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     loop {
-        let stream = match bootstrap.accept_public() {
-            Ok(stream) => stream,
+        let accepted = match bootstrap.accept_public() {
+            Ok(accepted) => accepted,
             Err(error) => {
                 eprintln!("herdr Nexus public accept failed: {error}");
                 continue;
             }
         };
+        let stream = accepted.stream;
+        let authority = accepted.authority;
         let Some(configuration) = bootstrap.snapshot() else {
             continue;
         };
@@ -56,11 +58,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(body))
                         .restore()?;
                 let herdr_nexus_wire::public_call::Query::Call(call) = call;
+                let principal = match authority {
+                    herdr_nexus_daemon::PublicAuthority::Translator => {
+                        shared_translator::Principal::Login(call.caller.user_id.clone())
+                    }
+                    herdr_nexus_daemon::PublicAuthority::Peer(peer_id) => {
+                        let actual = herdr_nexus_wire::frame::peer_caller(&stream)?;
+                        if call.caller.user_id != actual.user_id
+                            || call.caller.process_id != actual.process_id
+                        {
+                            return Err("configured peer serialized a different Caller".into());
+                        }
+                        shared_translator::Principal::Peer(peer_id)
+                    }
+                };
                 let query = call.input.0;
                 if let signal_herdr_nexus::Query::Subscribe(session) = query {
-                    return dispatcher.subscribe(stream, session, configuration);
+                    return dispatcher.subscribe_as(stream, principal, session, configuration);
                 }
-                let response = dispatcher.dispatch(query, Arc::clone(&configuration));
+                let response = dispatcher.dispatch_as(principal, query, Arc::clone(&configuration));
                 let response = herdr_nexus_wire::public_call::Response::Answered(
                     herdr_nexus_wire::public_payload::Output(response),
                 );

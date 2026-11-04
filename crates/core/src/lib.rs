@@ -53,13 +53,13 @@ impl InMemory {
         self.panes
             .values()
             .filter(|owned| &owned.pane.session == session)
-            .filter_map(|owned| {
-                owned.label_option.clone().map(|label| Known {
+            .map(|owned| {
+                Known {
                     pane: owned.pane.clone(),
-                    label,
+                    label_option: owned.label_option.clone(),
                     state: reconciled_state(owned, by_pane.get(&owned.pane).copied()),
                     attempt: owned.attempt.clone(),
-                })
+                }
             })
             .collect()
     }
@@ -565,7 +565,7 @@ mod tests {
             outcome,
             Outcome::Listed(vec![Known {
                 pane: pane(),
-                label: Label("mind/versionOne".into()),
+                label_option: Some(Label("mind/versionOne".into())),
                 state: State::Dead,
                 attempt: Attempt::Settled,
             }])

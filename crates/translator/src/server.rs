@@ -516,7 +516,18 @@ fn core_setting(setting: meta_signal_herdr_nexus::Set) -> core_meta_herdr_nexus:
         meta_signal_herdr_nexus::Set::SubscriberCapacity(value) => {
             core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value)
         }
-        _ => unreachable!("translator settings are handled before core conversion"),
+        meta_signal_herdr_nexus::Set::Peer(value) => {
+            core_meta_herdr_nexus::CoreSet::Peer(value)
+        }
+        meta_signal_herdr_nexus::Set::RemovePeer(value) => {
+            core_meta_herdr_nexus::CoreSet::RemovePeer(value)
+        }
+        meta_signal_herdr_nexus::Set::HerdrPath(_)
+        | meta_signal_herdr_nexus::Set::CallTimeout(_)
+        | meta_signal_herdr_nexus::Set::OutputLimit(_)
+        | meta_signal_herdr_nexus::Set::TextBudget(_) => {
+            unreachable!("translator settings are handled before core conversion")
+        }
     }
 }
 
@@ -718,6 +729,10 @@ fn public_setting(setting: core_meta_herdr_nexus::CoreSet) -> meta_signal_herdr_
             meta_signal_herdr_nexus::Set::TransportTimeout(value),
         core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value) =>
             meta_signal_herdr_nexus::Set::SubscriberCapacity(value),
+        core_meta_herdr_nexus::CoreSet::Peer(value) =>
+            meta_signal_herdr_nexus::Set::Peer(value),
+        core_meta_herdr_nexus::CoreSet::RemovePeer(value) =>
+            meta_signal_herdr_nexus::Set::RemovePeer(value),
     }
 }
 

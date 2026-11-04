@@ -1,5 +1,6 @@
 Signal
-[ meta_signal_herdr_nexus:[ Timeout ByteLimit Readiness ConfigurationRefusal ] ] ; imports
+[ meta_signal_herdr_nexus:[ Timeout ByteLimit Readiness ConfigurationRefusal ] ; imports
+  translator:[ PeerBinding PeerId ] ]
 [ Configure.CoreSet ]                                  ; inputs: one Nexus-owned field
 [ Configured.{ CoreSet Readiness }                     ; outputs: applied field and target readiness
   ConfigureRefused.ConfigurationRefusal ]
@@ -7,4 +8,6 @@ Signal
              Polling.meta_signal_herdr_nexus:Timeout
              FrameCapacity.meta_signal_herdr_nexus:ByteLimit
              TransportTimeout.meta_signal_herdr_nexus:Timeout
-             SubscriberCapacity.Integer ] ]
+             SubscriberCapacity.Integer
+             Peer.translator:PeerBinding
+             RemovePeer.translator:PeerId ] ]

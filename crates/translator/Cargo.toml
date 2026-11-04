@@ -18,7 +18,7 @@ datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "e26d9
 
 [dependencies.signal-herdr-nexus]
 git = "https://github.com/LiGoldragon/signal-herdr-nexus"
-rev = "4f9705e"
+rev = "60198e1"
 
 [dependencies.shared-translator]
 package = "translator"
