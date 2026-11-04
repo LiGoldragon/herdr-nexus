@@ -7,7 +7,7 @@ use shared_translator::{FrameReading,FrameWriting,Restorable,Signal,Signalizable
 pub fn run(place: &Place) -> Result<(), ServerError> {
  let socket=std::path::Path::new(&place.directory.0).join("herdr-translator.sock");
  let listener=UnixListener::bind(socket).map_err(ServerError::Io)?;
- for stream in listener.incoming() { let mut stream=stream.map_err(ServerError::Io)?; serve_one(&mut stream)?; }
+ for stream in listener.incoming() { let Ok(mut stream)=stream else { continue }; let _=serve_one(&mut stream); }
  Ok(())
 }
 pub fn serve_one(stream:&mut UnixStream)->Result<(),ServerError>{
@@ -75,3 +75,4 @@ mod tests { use super::*; #[test] fn list_object_maps_complete_panes(){let j=br#
 #[cfg(test)]
 mod readiness_tests { use super::*; #[test] fn readiness_states_require_positive_field(){let s=signal_herdr_nexus::Session("s".into()); let ready=br#"{"result":{"panes":[{"pane_id":"p","interactive_ready":true}]}}"#; match parse_success(ready,"list",None,s){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Idle),_=>panic!()} let s=signal_herdr_nexus::Session("s".into()); let unknown=br#"{"result":{"panes":[{"pane_id":"p"}]}}"#; match parse_success(unknown,"list",None,s){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Open),_=>panic!()} } }
 #[cfg(test)] mod missing_agent_tests { use super::*; #[test] fn unstarted_pane_is_open(){let p=br#"{"result":{"type":"pane_list","panes":[{"pane_id":"p"}]}}"#;let a=br#"{"result":{"type":"agent_list","agents":[]}}"#;match parse_list_join(p,a,signal_herdr_nexus::Session("s".into())){ExternalOutcome::Listed(v)=>assert_eq!(v[0].state,State::Open),_=>panic!()}}}
+#[cfg(test)] mod listener_tests { use super::*; #[test] fn malformed_frame_does_not_poison_following_decode(){assert!(matches!(parse_success(b"bad","prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Uncertain)); let good=br#"{"result":{"type":"agent_prompted"}}"#; assert!(matches!(parse_success(good,"prompt",Some("p".into()),signal_herdr_nexus::Session("s".into())),ExternalOutcome::Done));}}
