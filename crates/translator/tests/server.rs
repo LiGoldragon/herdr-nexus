@@ -220,18 +220,22 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
         ExternalOutcome::Done
     );
 
-    let ExternalOutcome::Listed(snapshot) = execute(&runtime, &herdr(Verb::PaneList)) else {
-        panic!("complete list expected");
+    let ExternalOutcome::Panes(panes) = execute(&runtime, &herdr(Verb::PaneList)) else {
+        panic!("pane list expected");
     };
-    assert_eq!(snapshot.len(), 1);
-    assert_eq!(snapshot[0].pane.pane_id.0, "w:p");
-    assert_eq!(snapshot[0].state, State::Idle);
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].pane.pane_id.0, "w:p");
+    let ExternalOutcome::Agents(agents) = execute(&runtime, &herdr(Verb::AgentList)) else {
+        panic!("agent list expected");
+    };
+    assert_eq!(agents.len(), 1);
+    assert_eq!(agents[0].state, State::Idle);
 }
 
 #[test]
 fn production_execute_preserves_symbolic_refusal_and_process_status() {
     let fixture = Fixture::new(
-        r#"printf '%s\n' '{"id":"cli:agent:start","error":{"code":"agent_executable_not_allowed","message":"not configured"}}' >&2
+        r#"printf '%s\n' '{"id":"cli:pane:close","error":{"code":"agent_executable_not_allowed","message":"not configured"}}' >&2
 exit 7"#,
     );
     let outcome = execute(

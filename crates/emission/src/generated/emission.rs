@@ -54,6 +54,38 @@ pub enum Verb {
     Keys(Keys_Data),
     PaneClose(signal_herdr_nexus::PaneId),
     PaneList,
+    AgentList,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct TerminalId(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct WorkspaceId(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct TabId(pub String);
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct PaneListing {
+    pub pane: signal_herdr_nexus::Pane,
+    pub terminal_id: TerminalId,
+    pub workspace_id: WorkspaceId,
+    pub tab_id: TabId,
+}
+#[rustfmt::skip]
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
+pub struct AgentListing {
+    pub pane: signal_herdr_nexus::Pane,
+    pub terminal_id: TerminalId,
+    pub workspace_id: WorkspaceId,
+    pub tab_id: TabId,
+    pub state: signal_herdr_nexus::State,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
@@ -69,7 +101,8 @@ pub enum ExternalOutcome {
     Done,
     Started(signal_herdr_nexus::State),
     Created(signal_herdr_nexus::Pane),
-    Listed(std::vec::Vec<PaneObservation>),
+    Panes(std::vec::Vec<PaneListing>),
+    Agents(std::vec::Vec<AgentListing>),
     Refused(signal_herdr_nexus::Refusal),
     Uncertain,
 }

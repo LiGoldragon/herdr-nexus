@@ -10,11 +10,18 @@ Signal
          AgentPrompt.{ PaneId Text }
          Keys.{ PaneId Keys }
          PaneClose.PaneId
-         PaneList ]
+         PaneList
+         AgentList ]
+  TerminalId.String
+  WorkspaceId.String
+  TabId.String
+  PaneListing.{ Pane TerminalId WorkspaceId TabId }
+  AgentListing.{ Pane TerminalId WorkspaceId TabId State }
   PaneObservation.{ Pane State }
   ExternalOutcome.[ Done
                     Started.State
                     Created.Pane
-                    Listed.Vector<PaneObservation>
+                    Panes.Vector<PaneListing>
+                    Agents.Vector<AgentListing>
                     Refused.Refusal
                     Uncertain ] ]

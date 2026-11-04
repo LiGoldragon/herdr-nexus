@@ -547,16 +547,29 @@ impl Dispatcher {
                         Err(outcome) => return Response::Listed(outcome),
                     }
                 };
-                let external = self.execute(
+                let panes = self.execute(
                     &configuration,
                     Herdr {
                         session: session.clone(),
                         verb: Verb::PaneList,
                     },
                 );
+                let external = match pane_listing_result(panes) {
+                    Ok(panes) => {
+                        let agents = self.execute(
+                            &configuration,
+                            Herdr {
+                                session: session.clone(),
+                                verb: Verb::AgentList,
+                            },
+                        );
+                        join_listings(panes, agent_listing_result(agents))
+                    }
+                    Err(result) => result,
+                };
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
                 let external = protect_newer_state(&state, &session, &captured, external);
-                let outcome = state.core.list(session.clone(), listed_result(external));
+                let outcome = state.core.list(session.clone(), external);
                 if matches!(outcome, signal_herdr_nexus::Outcome::Listed(_)) {
                     if let Ok(owned) = state.core.owned_in_session(&session) {
                         for owned in owned {
@@ -885,15 +898,13 @@ fn protect_newer_state(
     state: &DispatcherState,
     session: &signal_herdr_nexus::Session,
     captured: &std::collections::HashMap<signal_herdr_nexus::Pane, u64>,
-    external: EmissionResult,
-) -> EmissionResult {
-    let EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Listed(mut observed)) =
-        external
-    else {
+    external: herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>>,
+) -> herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>> {
+    let herdr_nexus_core::ExternalResult::Succeeded(mut observed) = external else {
         return external;
     };
     let Ok(owned) = state.core.owned_in_session(session) else {
-        return EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Listed(observed));
+        return herdr_nexus_core::ExternalResult::Succeeded(observed);
     };
     for current in owned {
         let changed = captured.get(&current.pane) != state.revisions.get(&current.pane)
@@ -906,7 +917,7 @@ fn protect_newer_state(
             });
         }
     }
-    EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Listed(observed))
+    herdr_nexus_core::ExternalResult::Succeeded(observed)
 }
 
 fn unavailable_transport(path: &std::path::Path, message: String) -> EmissionResult {
@@ -982,21 +993,90 @@ fn created_result(
     }
 }
 
-fn listed_result(
+fn pane_listing_result(
     outcome: EmissionResult,
-) -> herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>> {
+) -> Result<
+    Vec<emission_herdr_nexus::PaneListing>,
+    herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>>,
+> {
     match outcome {
-        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Listed(observed)) => {
-            herdr_nexus_core::ExternalResult::Succeeded(observed)
-        }
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Panes(observed)) => Ok(observed),
         EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
-            herdr_nexus_core::ExternalResult::Refused(refusal)
+            Err(herdr_nexus_core::ExternalResult::Refused(refusal))
         }
         EmissionResult::Unavailable(refusal) => {
-            herdr_nexus_core::ExternalResult::Unavailable(refusal)
+            Err(herdr_nexus_core::ExternalResult::Unavailable(refusal))
         }
-        _ => herdr_nexus_core::ExternalResult::Uncertain,
+        _ => Err(herdr_nexus_core::ExternalResult::Uncertain),
     }
+}
+
+fn agent_listing_result(
+    outcome: EmissionResult,
+) -> Result<
+    Vec<emission_herdr_nexus::AgentListing>,
+    herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>>,
+> {
+    match outcome {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Agents(observed)) => Ok(observed),
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
+            Err(herdr_nexus_core::ExternalResult::Refused(refusal))
+        }
+        EmissionResult::Unavailable(refusal) => {
+            Err(herdr_nexus_core::ExternalResult::Unavailable(refusal))
+        }
+        _ => Err(herdr_nexus_core::ExternalResult::Uncertain),
+    }
+}
+
+fn join_listings(
+    panes: Vec<emission_herdr_nexus::PaneListing>,
+    agents: Result<
+        Vec<emission_herdr_nexus::AgentListing>,
+        herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>>,
+    >,
+) -> herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>> {
+    use std::collections::{HashMap, HashSet};
+    let agents = match agents {
+        Ok(agents) => agents,
+        Err(result) => return result,
+    };
+    let mut pane_ids = HashSet::new();
+    let panes_by_id: HashMap<_, _> = panes
+        .iter()
+        .filter_map(|pane| {
+            pane_ids
+                .insert(pane.pane.clone())
+                .then_some((pane.pane.clone(), pane))
+        })
+        .collect();
+    if panes_by_id.len() != panes.len() {
+        return herdr_nexus_core::ExternalResult::Uncertain;
+    }
+    let mut agents_by_id = HashMap::new();
+    for agent in agents {
+        let Some(pane) = panes_by_id.get(&agent.pane) else {
+            return herdr_nexus_core::ExternalResult::Uncertain;
+        };
+        if agent.terminal_id.0 != pane.terminal_id.0
+            || agent.workspace_id.0 != pane.workspace_id.0
+            || agent.tab_id.0 != pane.tab_id.0
+            || agents_by_id.insert(agent.pane.clone(), agent).is_some()
+        {
+            return herdr_nexus_core::ExternalResult::Uncertain;
+        }
+    }
+    herdr_nexus_core::ExternalResult::Succeeded(
+        panes
+            .into_iter()
+            .map(|pane| emission_herdr_nexus::PaneObservation {
+                state: agents_by_id
+                    .remove(&pane.pane)
+                    .map_or(signal_herdr_nexus::State::Open, |agent| agent.state),
+                pane: pane.pane,
+            })
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1313,13 +1393,35 @@ mod tests {
         release_list: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
     }
 
+    fn pane_listing(pane: &signal_herdr_nexus::Pane) -> emission_herdr_nexus::PaneListing {
+        emission_herdr_nexus::PaneListing {
+            pane: pane.clone(),
+            terminal_id: emission_herdr_nexus::TerminalId("terminal".into()),
+            workspace_id: emission_herdr_nexus::WorkspaceId("workspace".into()),
+            tab_id: emission_herdr_nexus::TabId("tab".into()),
+        }
+    }
+
+    fn agent_listing(
+        pane: &signal_herdr_nexus::Pane,
+        state: signal_herdr_nexus::State,
+    ) -> emission_herdr_nexus::AgentListing {
+        emission_herdr_nexus::AgentListing {
+            pane: pane.clone(),
+            terminal_id: emission_herdr_nexus::TerminalId("terminal".into()),
+            workspace_id: emission_herdr_nexus::WorkspaceId("workspace".into()),
+            tab_id: emission_herdr_nexus::TabId("tab".into()),
+            state,
+        }
+    }
+
     impl ExternalEmitter for StaleListEmitter {
         fn emit(
             &self,
             _configuration: &RuntimeConfiguration,
             herdr: emission_herdr_nexus::Herdr,
         ) -> EmissionResult {
-            use emission_herdr_nexus::{ExternalOutcome, PaneObservation, Verb};
+            use emission_herdr_nexus::{ExternalOutcome, Verb};
             EmissionResult::External(match herdr.verb {
                 Verb::WorkspaceCreate(_) => ExternalOutcome::Created(self.pane.clone()),
                 Verb::AgentStart(_) => ExternalOutcome::Started(signal_herdr_nexus::State::Busy),
@@ -1330,11 +1432,12 @@ mod tests {
                         .expect("release lock")
                         .recv()
                         .expect("release list");
-                    ExternalOutcome::Listed(vec![PaneObservation {
-                        pane: self.pane.clone(),
-                        state: signal_herdr_nexus::State::Open,
-                    }])
+                    ExternalOutcome::Panes(vec![pane_listing(&self.pane)])
                 }
+                Verb::AgentList => ExternalOutcome::Agents(vec![agent_listing(
+                    &self.pane,
+                    signal_herdr_nexus::State::Open,
+                )]),
                 _ => ExternalOutcome::Done,
             })
         }
@@ -1454,17 +1557,19 @@ mod tests {
                         .push(configuration.start_timeout);
                     self.list_count
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    self.listings
-                        .lock()
-                        .expect("listings")
-                        .pop_front()
-                        .unwrap_or(ExternalOutcome::Listed(vec![
-                            emission_herdr_nexus::PaneObservation {
-                                pane: self.pane.clone(),
-                                state: signal_herdr_nexus::State::Open,
-                            },
-                        ]))
+                    ExternalOutcome::Panes(vec![pane_listing(&self.pane)])
                 }
+                Verb::AgentList => self
+                    .listings
+                    .lock()
+                    .expect("listings")
+                    .pop_front()
+                    .unwrap_or_else(|| {
+                        ExternalOutcome::Agents(vec![agent_listing(
+                            &self.pane,
+                            signal_herdr_nexus::State::Open,
+                        )])
+                    }),
                 _ => ExternalOutcome::Done,
             })
         }
@@ -1539,13 +1644,13 @@ mod tests {
 
     #[test]
     fn subscription_acks_then_reports_current_and_one_harness_loss() {
-        use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
+        use emission_herdr_nexus::ExternalOutcome;
         let (dispatcher, _emitter, pane) = started_dispatcher(vec![
             ExternalOutcome::Uncertain,
-            ExternalOutcome::Listed(vec![PaneObservation {
-                pane: pane_for("subscription", "pane"),
-                state: signal_herdr_nexus::State::Open,
-            }]),
+            ExternalOutcome::Agents(vec![agent_listing(
+                &pane_for("subscription", "pane"),
+                signal_herdr_nexus::State::Open,
+            )]),
         ]);
         let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("pair");
         client
@@ -1604,12 +1709,12 @@ mod tests {
 
     #[test]
     fn late_subscriber_cursor_does_not_repeat_its_current_state() {
-        use emission_herdr_nexus::{ExternalOutcome, PaneObservation};
+        use emission_herdr_nexus::ExternalOutcome;
         use signal_herdr_nexus::{AgentKind, AgentName, Command, Executable, Label, Program, Query, Start_Data};
         let pane = pane_for("subscription", "pane");
         let (dispatcher, _emitter, _) = started_dispatcher(vec![
-            ExternalOutcome::Listed(vec![PaneObservation { pane: pane.clone(), state: signal_herdr_nexus::State::Idle }]),
-            ExternalOutcome::Listed(vec![PaneObservation { pane: pane.clone(), state: signal_herdr_nexus::State::Busy }]),
+            ExternalOutcome::Agents(vec![agent_listing(&pane, signal_herdr_nexus::State::Idle)]),
+            ExternalOutcome::Agents(vec![agent_listing(&pane, signal_herdr_nexus::State::Busy)]),
         ]);
         let slow = Arc::new(RuntimeConfiguration {
             polling: Duration::from_millis(100),

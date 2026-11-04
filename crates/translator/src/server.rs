@@ -1,7 +1,7 @@
 use crate::runner::{self, Captured};
 use emission_herdr_nexus::{
-    AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data, PaneObservation, Verb,
-    WorkspaceCreate_Data,
+    AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data,
+    PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId,
 };
 use serde::Deserialize;
 use shared_translator::placement::Place;
@@ -739,18 +739,13 @@ fn invalid_setting(
 
 /// Executes one typed external emission with a captured configuration snapshot.
 pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
-    match &herdr.verb {
-        Verb::PaneList => execute_list(runtime, &herdr.session),
-        verb => {
-            let Some(invocation) = invocation(&herdr.session, verb, runtime) else {
-                return ExternalOutcome::Uncertain;
-            };
-            let Some(captured) = run_invocation(runtime, &invocation) else {
-                return ExternalOutcome::Uncertain;
-            };
-            decode(&invocation.decoder, captured, &herdr.session)
-        }
-    }
+    let Some(invocation) = invocation(&herdr.session, &herdr.verb, runtime) else {
+        return ExternalOutcome::Uncertain;
+    };
+    let Some(captured) = run_invocation(runtime, &invocation) else {
+        return ExternalOutcome::Uncertain;
+    };
+    decode(&invocation.decoder, captured, &herdr.session)
 }
 
 #[derive(Clone)]
@@ -861,11 +856,19 @@ impl Arguable for PaneCloseArgument<'_> {
     }
 }
 
-struct ListArgument(&'static str);
+struct PaneListArgument;
 
-impl Arguable for ListArgument {
+impl Arguable for PaneListArgument {
     fn arguments(&self) -> Vec<OsString> {
-        vec![OsString::from(self.0), OsString::from("list")]
+        vec![OsString::from("pane"), OsString::from("list")]
+    }
+}
+
+struct AgentListArgument;
+
+impl Arguable for AgentListArgument {
+    fn arguments(&self) -> Vec<OsString> {
+        vec![OsString::from("agent"), OsString::from("list")]
     }
 }
 
@@ -921,7 +924,16 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
             runtime.call_timeout,
             Decoder::PaneClose,
         ),
-        Verb::PaneList => unreachable!("list has a complete-snapshot path"),
+        Verb::PaneList => (
+            PaneListArgument.arguments(),
+            runtime.call_timeout,
+            Decoder::PaneList,
+        ),
+        Verb::AgentList => (
+            AgentListArgument.arguments(),
+            runtime.call_timeout,
+            Decoder::AgentList,
+        ),
     };
     arguments.extend(specific);
     Some(Invocation {
@@ -929,21 +941,6 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
         timeout,
         decoder,
     })
-}
-
-fn list_invocation(session: &Session, runtime: &Runtime, agent: bool) -> Invocation {
-    let noun = if agent { "agent" } else { "pane" };
-    let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
-    arguments.extend(ListArgument(noun).arguments());
-    Invocation {
-        arguments,
-        timeout: runtime.call_timeout,
-        decoder: if agent {
-            Decoder::AgentList
-        } else {
-            Decoder::PaneList
-        },
-    }
 }
 
 fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured> {
@@ -962,27 +959,9 @@ fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured
     }
 }
 
-fn execute_list(runtime: &Runtime, session: &Session) -> ExternalOutcome {
-    let panes_invocation = list_invocation(session, runtime, false);
-    let Some(panes) = run_invocation(runtime, &panes_invocation) else {
-        return ExternalOutcome::Uncertain;
-    };
-    if !panes.status.success() {
-        return refusal_or_uncertain(&panes);
-    }
-    let agents_invocation = list_invocation(session, runtime, true);
-    let Some(agents) = run_invocation(runtime, &agents_invocation) else {
-        return ExternalOutcome::Uncertain;
-    };
-    if !agents.status.success() {
-        return refusal_or_uncertain(&agents);
-    }
-    decode_complete_snapshot(&panes.stdout, &agents.stdout, session)
-}
-
 fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalOutcome {
     if !captured.status.success() {
-        return refusal_or_uncertain(&captured);
+        return refusal_or_uncertain(&captured, decoder.response_id());
     }
     match decoder {
         Decoder::WorkspaceCreate => decode_workspace(&captured.stdout, session),
@@ -994,13 +973,28 @@ fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalO
         Decoder::AgentPrompt { pane_id } => decode_prompt(&captured.stdout, pane_id),
         // Herdr's send-keys CLI deliberately emits no success JSON.
         Decoder::Keys if captured.stdout.is_empty() => ExternalOutcome::Done,
-        Decoder::Keys => decode_ok(&captured.stdout, None),
+        Decoder::Keys => ExternalOutcome::Uncertain,
         Decoder::PaneClose => decode_ok(&captured.stdout, Some("cli:pane:close")),
-        Decoder::PaneList | Decoder::AgentList => ExternalOutcome::Uncertain,
+        Decoder::PaneList => decode_panes(&captured.stdout, session),
+        Decoder::AgentList => decode_agents(&captured.stdout, session),
     }
 }
 
-fn refusal_or_uncertain(captured: &Captured) -> ExternalOutcome {
+impl Decoder {
+    fn response_id(&self) -> &'static str {
+        match self {
+            Self::WorkspaceCreate => "cli:workspace:create",
+            Self::AgentStart { .. } => "cli:agent:start",
+            Self::AgentPrompt { .. } => "cli:agent:prompt",
+            Self::Keys => "cli:pane:send-keys",
+            Self::PaneClose => "cli:pane:close",
+            Self::PaneList => "cli:pane:list",
+            Self::AgentList => "cli:agent:list",
+        }
+    }
+}
+
+fn refusal_or_uncertain(captured: &Captured, expected_id: &str) -> ExternalOutcome {
     // Herdr's failure contract is one JSON envelope on stderr. Stdout is the
     // success channel and is never tried as a fallback failure language.
     let envelope = serde_json::from_slice::<ErrorEnvelope>(&captured.stderr);
@@ -1013,6 +1007,9 @@ fn refusal_or_uncertain(captured: &Captured) -> ExternalOutcome {
         );
         return ExternalOutcome::Uncertain;
     };
+    if envelope.id != expected_id {
+        return ExternalOutcome::Uncertain;
+    }
     ExternalOutcome::Refused(Refusal {
         error_code: ErrorCode(envelope.error.code),
         exit_status_option: captured
@@ -1188,64 +1185,63 @@ fn decode_ok(bytes: &[u8], expected_id: Option<&str>) -> ExternalOutcome {
     }
 }
 
-fn decode_complete_snapshot(panes: &[u8], agents: &[u8], session: &Session) -> ExternalOutcome {
-    let Ok(pane_envelope) = serde_json::from_slice::<Envelope<PaneListResult>>(panes) else {
+fn decode_panes(bytes: &[u8], session: &Session) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<PaneListResult>>(bytes) else {
         return ExternalOutcome::Uncertain;
     };
-    let Ok(agent_envelope) = serde_json::from_slice::<Envelope<AgentListResult>>(agents) else {
-        return ExternalOutcome::Uncertain;
-    };
-    if pane_envelope.id != "cli:pane:list"
-        || pane_envelope.result.kind != "pane_list"
-        || agent_envelope.id != "cli:agent:list"
-        || agent_envelope.result.kind != "agent_list"
-    {
+    if envelope.id != "cli:pane:list" || envelope.result.kind != "pane_list" {
         return ExternalOutcome::Uncertain;
     }
-
-    let panes = pane_envelope.result.panes;
     let mut pane_ids = HashSet::new();
-    for pane in &panes {
+    for pane in &envelope.result.panes {
         if !pane_ids.insert(pane.pane_id.as_str()) {
             return ExternalOutcome::Uncertain;
         }
     }
-    let panes_by_id: HashMap<_, _> = panes
-        .iter()
-        .map(|pane| (pane.pane_id.as_str(), pane))
-        .collect();
-    let mut agents_by_id = HashMap::new();
-    for agent in agent_envelope.result.agents {
-        let Some(pane) = panes_by_id.get(agent.pane_id.as_str()) else {
-            return ExternalOutcome::Uncertain;
-        };
-        if agent.terminal_id != pane.terminal_id
-            || agent.workspace_id != pane.workspace_id
-            || agent.tab_id != pane.tab_id
-            || agents_by_id.insert(agent.pane_id.clone(), agent).is_some()
-        {
-            return ExternalOutcome::Uncertain;
-        }
-    }
-
-    ExternalOutcome::Listed(
-        panes
+    ExternalOutcome::Panes(
+        envelope
+            .result
+            .panes
             .into_iter()
-            .map(|pane| {
-                let state = agents_by_id
-                    .get(&pane.pane_id)
-                    .map(agent_state)
-                    .unwrap_or(State::Open);
-                PaneObservation {
-                    pane: Pane {
-                        session: session.clone(),
-                        pane_id: PaneId(pane.pane_id),
-                    },
-                    state,
-                }
+            .map(|pane| PaneListing {
+                pane: Pane {
+                    session: session.clone(),
+                    pane_id: PaneId(pane.pane_id),
+                },
+                terminal_id: TerminalId(pane.terminal_id),
+                workspace_id: WorkspaceId(pane.workspace_id),
+                tab_id: TabId(pane.tab_id),
             })
             .collect(),
     )
+}
+
+fn decode_agents(bytes: &[u8], session: &Session) -> ExternalOutcome {
+    let Ok(envelope) = serde_json::from_slice::<Envelope<AgentListResult>>(bytes) else {
+        return ExternalOutcome::Uncertain;
+    };
+    if envelope.id != "cli:agent:list" || envelope.result.kind != "agent_list" {
+        return ExternalOutcome::Uncertain;
+    }
+    let mut pane_ids = HashSet::new();
+    let mut listings = Vec::with_capacity(envelope.result.agents.len());
+    for agent in envelope.result.agents {
+        if !pane_ids.insert(agent.pane_id.clone()) {
+            return ExternalOutcome::Uncertain;
+        }
+        let state = agent_state(&agent);
+        listings.push(AgentListing {
+            pane: Pane {
+                session: session.clone(),
+                pane_id: PaneId(agent.pane_id),
+            },
+            terminal_id: TerminalId(agent.terminal_id),
+            workspace_id: WorkspaceId(agent.workspace_id),
+            tab_id: TabId(agent.tab_id),
+            state,
+        });
+    }
+    ExternalOutcome::Agents(listings)
 }
 
 fn agent_state(agent: &AgentJson) -> State {
@@ -1462,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_snapshot_maps_readiness_and_missing_agent() {
+    fn separate_list_decoders_preserve_readiness_and_identity() {
         let panes = format!(
             r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{},{},{}]}}}}"#,
             pane("idle", "idle"),
@@ -1474,40 +1470,40 @@ mod tests {
             agent("idle", "idle", true),
             agent("blocked", "blocked", false)
         );
-        let ExternalOutcome::Listed(observed) =
-            decode_complete_snapshot(panes.as_bytes(), agents.as_bytes(), &Session("main".into()))
+        let ExternalOutcome::Panes(panes) = decode_panes(panes.as_bytes(), &Session("main".into()))
         else {
-            panic!("complete snapshot expected");
+            panic!("pane listing expected");
         };
-        let states: HashMap<_, _> = observed
+        assert_eq!(panes.len(), 3);
+        let ExternalOutcome::Agents(agents) = decode_agents(agents.as_bytes(), &Session("main".into()))
+        else {
+            panic!("agent listing expected");
+        };
+        let states: HashMap<_, _> = agents
             .into_iter()
             .map(|item| (item.pane.pane_id.0, item.state))
             .collect();
         assert_eq!(states["idle"], State::Idle);
         assert_eq!(states["blocked"], State::Busy);
-        assert_eq!(states["plain"], State::Open);
     }
 
     #[test]
-    fn duplicate_or_orphaned_snapshot_entries_are_uncertain() {
+    fn duplicate_entries_are_uncertain_within_each_external_result() {
         let one = pane("p", "unknown");
         let duplicate = format!(
             r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{one},{one}]}}}}"#
         );
-        let empty_agents = br#"{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}"#;
         assert!(matches!(
-            decode_complete_snapshot(duplicate.as_bytes(), empty_agents, &Session("main".into())),
+            decode_panes(duplicate.as_bytes(), &Session("main".into())),
             ExternalOutcome::Uncertain
         ));
 
-        let panes =
-            format!(r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{one}]}}}}"#);
+        let duplicate_agent = agent("other", "idle", true);
         let agents = format!(
-            r#"{{"id":"cli:agent:list","result":{{"type":"agent_list","agents":[{}]}}}}"#,
-            agent("other", "idle", true)
+            r#"{{"id":"cli:agent:list","result":{{"type":"agent_list","agents":[{duplicate_agent},{duplicate_agent}]}}}}"#,
         );
         assert!(matches!(
-            decode_complete_snapshot(panes.as_bytes(), agents.as_bytes(), &Session("main".into())),
+            decode_agents(agents.as_bytes(), &Session("main".into())),
             ExternalOutcome::Uncertain
         ));
     }
@@ -1518,9 +1514,8 @@ mod tests {
             r#"{{"id":"cli:pane:list","result":{{"type":"pane_list","panes":[{}]}}}}"#,
             pane("p", "impossible")
         );
-        let agents = br#"{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}"#;
         assert!(matches!(
-            decode_complete_snapshot(panes.as_bytes(), agents, &Session("main".into())),
+            decode_panes(panes.as_bytes(), &Session("main".into())),
             ExternalOutcome::Uncertain
         ));
     }
