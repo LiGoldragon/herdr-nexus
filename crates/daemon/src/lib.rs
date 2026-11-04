@@ -359,6 +359,7 @@ impl Dispatcher {
                     Ok(token) => token,
                     Err(outcome) => return Response::Started(outcome),
                 };
+                let command = start.command.clone();
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -377,7 +378,7 @@ impl Dispatcher {
                 let pane = start.pane;
                 let outcome = state
                     .core
-                    .start(pane.clone(), start.label, started_result(external));
+                    .start(pane.clone(), command, start.label, started_result(external));
                 if outcome == signal_herdr_nexus::Outcome::Done {
                     bump_revision(&mut state.revisions, pane);
                 }
@@ -388,6 +389,7 @@ impl Dispatcher {
                     Ok(token) => token,
                     Err(outcome) => return Response::Prompted(outcome),
                 };
+                let text = prompt.text.clone();
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -399,13 +401,14 @@ impl Dispatcher {
                     },
                 );
                 let mut state = self.finish_reservation(&prompt.pane, reservation);
-                Response::Prompted(state.core.prompt(prompt.pane, done_result(external)))
+                Response::Prompted(state.core.prompt(prompt.pane, text, done_result(external)))
             }
             Operation::Pressing(press) => {
                 let reservation = match self.reserve(&press.pane) {
                     Ok(token) => token,
                     Err(outcome) => return Response::Pressed(outcome),
                 };
+                let keys = press.keys.clone();
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -417,7 +420,7 @@ impl Dispatcher {
                     },
                 );
                 let mut state = self.finish_reservation(&press.pane, reservation);
-                Response::Pressed(state.core.press(press.pane, done_result(external)))
+                Response::Pressed(state.core.press(press.pane, keys, done_result(external)))
             }
             Operation::Closing(pane) => {
                 let reservation = match self.reserve(&pane) {

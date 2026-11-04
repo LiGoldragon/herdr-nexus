@@ -26,7 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let meta = Arc::clone(&bootstrap);
     std::thread::spawn(move || loop {
-        let _ = meta.serve_next_meta();
+        if let Err(error) = meta.serve_next_meta() {
+            eprintln!("herdr Nexus meta request failed: {error}");
+        }
     });
 
     loop {
@@ -73,7 +75,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output.write_frame(&response.signalize()?, capacity)?;
                 Ok(())
             })();
-            let _ = result;
+            if let Err(error) = result {
+                eprintln!("herdr Nexus public request failed: {error}");
+            }
         });
     }
 }

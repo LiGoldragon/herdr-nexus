@@ -165,7 +165,15 @@ fn wait_for_output(
     // SAFETY: `descriptors` is a valid mutable array for the duration of this call.
     let result = unsafe { libc::poll(descriptors.as_mut_ptr(), descriptors.len() as _, milliseconds) };
     if result < 0 {
-        Err(std::io::Error::last_os_error())
+        let error = std::io::Error::last_os_error();
+        // A child exit may interrupt poll before its pipe hangup is observed.
+        // Returning to the outer loop preserves the same absolute deadline and
+        // lets it drain both pipes and reap the child.
+        if error.kind() == std::io::ErrorKind::Interrupted {
+            Ok(())
+        } else {
+            Err(error)
+        }
     } else {
         Ok(())
     }

@@ -15,7 +15,10 @@ difference is an audited generator limitation.
 ## Memory
 
 `InMemory` is a process-lifetime proof backend. It is nondurable and offers no
-restart recovery. The `Memory` trait is the persistence boundary. Tests use a
+restart recovery. `ethos/memory.ethos` declares the owned-pane and
+reconciliation records and the standard `Answer` returned by every change;
+the pinned generator output is checked in every Nix test run. Reads return
+typed snapshots separately. The `Memory` trait is the persistence boundary. Tests use a
 deterministic `RefusingMemory` to prove three facts separately: refusal before
 an external attempt, an observed external success followed by Memory refusal,
 and uncertainty whose reconciliation marker could not be stored.
@@ -42,21 +45,37 @@ separate. Internal failures never receive invented exit codes.
 
 ## Configuration and placement
 
-Runtime configuration is replaced as one validated candidate. It contains the
-herdr executable, positive representable polling and timeout durations, and a
-frame capacity from one byte through Signal's verified maximum. Defaults are
-deployment data, not Rust literals. Each attempt captures one immutable
-configuration snapshot.
+The Nexus and translator each own a partial configuration. One flat typed
+`Set` validates and applies one field; refusal preserves the previous partial
+snapshot. The Nexus owns start, polling, frame-capacity and transport limits.
+The translator owns the herdr path, call timeout, output limit and text budget.
+Each process reports the fields it still awaits and becomes ready only when
+all of its fields are present and their cross-field constraints hold. Defaults
+are deployment data, not Rust literals. Each attempt captures the fields it
+uses without holding Memory across external I/O.
 
-A launcher selects one `Place` from its typed registry and binds the three
-fixed sockets in that metaflow directory. The selected place is immutable for
-the bound daemon. The CLI takes a metaflow name and the launcher-supplied
+A launcher selects one `Place` from its typed registry and supplies exactly one
+typed binary bootstrap carrying the place and admission limits. Each metaflow
+has separate public and meta translator sockets and separate public and meta
+Nexus sockets. The selected place is immutable for each bound process. The CLI
+takes a metaflow name and the launcher-supplied
 registry path; it does not discover sockets through an environment variable or
-a hard-coded home directory. Placement is translator/metaflow integration and
-is not implemented by the pure core.
+a hard-coded home directory.
 
-The public socket remains unavailable until the meta surface accepts a valid
-configuration. This proof does not invent an unconfigured public error.
+The meta surfaces are admitted under bootstrap limits before runtime settings
+exist. Public service becomes ready only after the owning process has a
+complete valid configuration. The public text and emission lanes share the
+public translator socket; meta text has its own translator socket. Every lane
+checks the peer UID at the same-login boundary.
+
+## External calls
+
+Each external command implements `Arguable` on its own concrete argument type;
+the invocation composes those implementations with the one session prefix.
+Successful Herdr JSON is decoded only from stdout. A nonzero process result is
+decoded only from Herdr's documented stderr error envelope, with no fallback
+between the channels. The bounded runner drains both pipes while retaining at
+most the configured joint output limit.
 
 ## External state
 

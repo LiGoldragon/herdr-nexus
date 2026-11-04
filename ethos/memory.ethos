@@ -1,0 +1,7 @@
+Memory
+[ signal_herdr_nexus:[ Pane Workspace Label State MemoryRefusal ]
+  crate:[ Operation ] ]                             ; imports
+[ OwnedPane.{ Pane Workspace Option<Label> State } ; an owned pane and its last observed state
+  Reconciliation.Operation                         ; one uncertain operation retained for reconciliation
+  Answer.[ Succeeded                               ; standard result of a Memory change
+            Failed.MemoryRefusal ] ]

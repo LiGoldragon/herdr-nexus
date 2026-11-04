@@ -67,6 +67,11 @@
             declaration = ./ethos/operation.ethos;
             committed = ./crates/core/src/generated/operation.rs;
           } (builtins.readFile ./checks/generated-contract.sh);
+          memory-generated = pkgs.runCommand "herdr-memory-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/memory.ethos;
+            committed = ./crates/core/src/generated/memory.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
           emission-generated = pkgs.runCommand "herdr-emission-generated" {
             generator = ethos-zero.packages.${system}.default;
             declaration = ./ethos/emission.ethos;

@@ -239,7 +239,7 @@ exit 7"#,
         &herdr(Verb::PaneClose(PaneId("w:p".into()))),
     );
     let ExternalOutcome::Refused(refusal) = outcome else {
-        panic!("typed refusal expected");
+        panic!("typed refusal expected, got {outcome:?}");
     };
     assert_eq!(refusal.error_code.0, "agent_executable_not_allowed");
     assert_eq!(refusal.exit_status_option.expect("exit status").0, 7);

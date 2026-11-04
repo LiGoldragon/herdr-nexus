@@ -1,5 +1,8 @@
 use crate::runner::{self, Captured};
-use emission_herdr_nexus::{ExternalOutcome, Herdr, PaneObservation, Verb};
+use emission_herdr_nexus::{
+    AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data, PaneObservation, Verb,
+    WorkspaceCreate_Data,
+};
 use serde::Deserialize;
 use shared_translator::placement::Place;
 use shared_translator::{ByteViewable, FrameCapacity, Restorable, Signal, Signalizable};
@@ -72,14 +75,16 @@ fn serve_listener(
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         std::thread::spawn(move || {
-            let _ = serve_one(
+            if let Err(error) = serve_one(
                 &mut stream,
                 &configuration,
                 &place,
                 endpoint,
                 admission,
                 bootstrap_budget,
-            );
+            ) {
+                eprintln!("herdr translator request failed: {error}");
+            }
         });
     }
 }
@@ -137,8 +142,20 @@ pub fn serve_one(
                 admission.frame_capacity,
             );
         };
-        let text = request.text().map_err(ServerError::Transport)?;
-        let query = decode_public(text, &mut budget)?;
+        let query = (|| -> Result<_, ServerError> {
+            let text = request.text().map_err(ServerError::Transport)?;
+            decode_public(text, &mut budget)
+        })();
+        let query = match query {
+            Ok(query) => query,
+            Err(error) => {
+                drop(io);
+                let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
+                    stream.try_clone().map_err(ServerError::Io)?, timeout,
+                ).map_err(ServerError::Io)?;
+                return write_failed_frame(&mut output, lane, &error.to_string(), admission.frame_capacity);
+            }
+        };
         if matches!(query, signal_herdr_nexus::Query::Subscribe(_)) {
             drop(io);
             return forward_public_stream(
@@ -150,13 +167,23 @@ pub fn serve_one(
                 admission.frame_capacity,
             );
         }
-        let response = forward_public(place, caller, query, timeout)?;
-        let response = Frame {
-            lane: Lane::PublicText,
-            kind: Kind::Answered,
-            payload: shared_translator::encode(&response).into_bytes(),
+        let response = match forward_public(place, caller, query, timeout) {
+            Ok(response) => Frame {
+                lane: Lane::PublicText,
+                kind: Kind::Answered,
+                payload: shared_translator::encode(&response).into_bytes(),
+            },
+            Err(error) => Frame {
+                lane: Lane::PublicText,
+                kind: Kind::Failed,
+                payload: error.to_string().into_bytes(),
+            },
         };
-        return transport::write_frame(&mut io, &response, admission.frame_capacity)
+        drop(io);
+        let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
+            stream.try_clone().map_err(ServerError::Io)?, timeout,
+        ).map_err(ServerError::Io)?;
+        return transport::write_frame(&mut output, &response, admission.frame_capacity)
             .map_err(ServerError::Transport);
     }
     let response = (|| -> Result<Frame, ServerError> {
@@ -209,7 +236,12 @@ pub fn serve_one(
             payload: error.to_string().into_bytes(),
         },
     };
-    transport::write_frame(&mut io, &response, admission.frame_capacity)
+    drop(io);
+    let response_timeout = configuration.call_timeout().unwrap_or(admission.deadline);
+    let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
+        stream.try_clone().map_err(ServerError::Io)?, response_timeout,
+    ).map_err(ServerError::Io)?;
+    transport::write_frame(&mut output, &response, admission.frame_capacity)
         .map_err(ServerError::Transport)
 }
 
@@ -656,6 +688,97 @@ fn positive_duration(milliseconds: i64) -> Option<Duration> {
     (milliseconds != 0).then(|| Duration::from_millis(milliseconds))
 }
 
+trait Arguable {
+    fn arguments(&self) -> Vec<OsString>;
+}
+
+impl Arguable for WorkspaceCreate_Data {
+    fn arguments(&self) -> Vec<OsString> {
+        let mut arguments = vec![
+            OsString::from("workspace"),
+            OsString::from("create"),
+            OsString::from("--cwd"),
+            OsString::from(&self.root.0),
+        ];
+        for variable in &self.variable_vector {
+            arguments.push(OsString::from("--env"));
+            arguments.push(OsString::from(format!(
+                "{}={}",
+                variable.name.0, variable.value.0
+            )));
+        }
+        arguments
+    }
+}
+
+impl Arguable for AgentStart_Data {
+    fn arguments(&self) -> Vec<OsString> {
+        let mut arguments = vec![
+            OsString::from("agent"),
+            OsString::from("start"),
+            OsString::from(&self.command.agent_name.0),
+            OsString::from("--kind"),
+            OsString::from(agent_kind(&self.command.agent_kind)),
+            OsString::from("--pane"),
+            OsString::from(&self.pane_id.0),
+        ];
+        if let Executable::Explicit(program) = &self.command.executable {
+            arguments.push(OsString::from("--executable"));
+            arguments.push(OsString::from(&program.0));
+        }
+        arguments.push(OsString::from("--timeout"));
+        arguments.push(OsString::from(self.timeout.0.to_string()));
+        if !self.command.string_vector.is_empty() {
+            arguments.push(OsString::from("--"));
+            arguments.extend(self.command.string_vector.iter().map(OsString::from));
+        }
+        arguments
+    }
+}
+
+impl Arguable for AgentPrompt_Data {
+    fn arguments(&self) -> Vec<OsString> {
+        vec![
+            OsString::from("agent"),
+            OsString::from("prompt"),
+            OsString::from(&self.pane_id.0),
+            OsString::from(&self.text.0),
+        ]
+    }
+}
+
+impl Arguable for Keys_Data {
+    fn arguments(&self) -> Vec<OsString> {
+        let mut arguments = vec![
+            OsString::from("pane"),
+            OsString::from("send-keys"),
+            OsString::from(&self.pane_id.0),
+        ];
+        arguments.extend(self.keys.0.iter().map(OsString::from));
+        arguments
+    }
+}
+
+struct PaneCloseArgument<'a>(&'a PaneId);
+
+impl Arguable for PaneCloseArgument<'_> {
+    fn arguments(&self) -> Vec<OsString> {
+        vec![
+            OsString::from("pane"),
+            OsString::from("close"),
+            OsString::from(&self.0.0),
+        ]
+    }
+}
+
+struct ListArgument(&'static str);
+
+impl Arguable for ListArgument {
+    fn arguments(&self) -> Vec<OsString> {
+        vec![OsString::from(self.0), OsString::from("list")]
+    }
+}
+
 struct Invocation {
     arguments: Vec<OsString>,
     timeout: Duration,
@@ -681,46 +804,12 @@ enum Decoder {
 fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invocation> {
     let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
     let (specific, timeout, decoder) = match verb {
-        Verb::WorkspaceCreate(data) => {
-            let mut values = vec![
-                OsString::from("workspace"),
-                OsString::from("create"),
-                OsString::from("--cwd"),
-                OsString::from(&data.root.0),
-            ];
-            for variable in &data.variable_vector {
-                values.push(OsString::from("--env"));
-                values.push(OsString::from(format!(
-                    "{}={}",
-                    variable.name.0, variable.value.0
-                )));
-            }
-            (values, runtime.call_timeout, Decoder::WorkspaceCreate)
-        }
+        Verb::WorkspaceCreate(data) => (data.arguments(), runtime.call_timeout, Decoder::WorkspaceCreate),
         Verb::AgentStart(data) => {
             let start_timeout = positive_duration(data.timeout.0)?;
             let kind = agent_kind(&data.command.agent_kind);
-            let mut values = vec![
-                OsString::from("agent"),
-                OsString::from("start"),
-                OsString::from(&data.command.agent_name.0),
-                OsString::from("--kind"),
-                OsString::from(kind),
-                OsString::from("--pane"),
-                OsString::from(&data.pane_id.0),
-            ];
-            if let Executable::Explicit(program) = &data.command.executable {
-                values.push(OsString::from("--executable"));
-                values.push(OsString::from(&program.0));
-            }
-            values.push(OsString::from("--timeout"));
-            values.push(OsString::from(start_timeout.as_millis().to_string()));
-            if !data.command.string_vector.is_empty() {
-                values.push(OsString::from("--"));
-                values.extend(data.command.string_vector.iter().map(OsString::from));
-            }
             (
-                values,
+                data.arguments(),
                 start_timeout,
                 Decoder::AgentStart {
                     pane_id: data.pane_id.0.clone(),
@@ -730,32 +819,15 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
             )
         }
         Verb::AgentPrompt(data) => (
-            vec![
-                OsString::from("agent"),
-                OsString::from("prompt"),
-                OsString::from(&data.pane_id.0),
-                OsString::from(&data.text.0),
-            ],
+            data.arguments(),
             runtime.call_timeout,
             Decoder::AgentPrompt {
                 pane_id: data.pane_id.0.clone(),
             },
         ),
-        Verb::Keys(data) => {
-            let mut values = vec![
-                OsString::from("pane"),
-                OsString::from("send-keys"),
-                OsString::from(&data.pane_id.0),
-            ];
-            values.extend(data.keys.0.iter().map(OsString::from));
-            (values, runtime.call_timeout, Decoder::Keys)
-        }
+        Verb::Keys(data) => (data.arguments(), runtime.call_timeout, Decoder::Keys),
         Verb::PaneClose(pane_id) => (
-            vec![
-                OsString::from("pane"),
-                OsString::from("close"),
-                OsString::from(&pane_id.0),
-            ],
+            PaneCloseArgument(pane_id).arguments(),
             runtime.call_timeout,
             Decoder::PaneClose,
         ),
@@ -771,13 +843,10 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
 
 fn list_invocation(session: &Session, runtime: &Runtime, agent: bool) -> Invocation {
     let noun = if agent { "agent" } else { "pane" };
+    let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
+    arguments.extend(ListArgument(noun).arguments());
     Invocation {
-        arguments: vec![
-            OsString::from("--session"),
-            OsString::from(&session.0),
-            OsString::from(noun),
-            OsString::from("list"),
-        ],
+        arguments,
         timeout: runtime.call_timeout,
         decoder: if agent {
             Decoder::AgentList
@@ -837,8 +906,9 @@ fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalO
 }
 
 fn refusal_or_uncertain(captured: &Captured) -> ExternalOutcome {
-    let envelope = serde_json::from_slice::<ErrorEnvelope>(&captured.stderr)
-        .or_else(|_| serde_json::from_slice::<ErrorEnvelope>(&captured.stdout));
+    // Herdr's failure contract is one JSON envelope on stderr. Stdout is the
+    // success channel and is never tried as a fallback failure language.
+    let envelope = serde_json::from_slice::<ErrorEnvelope>(&captured.stderr);
     let Ok(envelope) = envelope else {
         return ExternalOutcome::Uncertain;
     };
