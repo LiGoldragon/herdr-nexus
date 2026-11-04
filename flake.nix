@@ -47,7 +47,7 @@
           version = "0.1.0";
           src = source;
           inherit cargoArtifacts;
-          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-nexus --bin herdr-nexus-meta --bin herdr-nexus-place";
+          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-nexus --bin herdr-nexus-meta --bin herdr-nexus-place --bin herdr-pair";
         };
         default = pkgs.symlinkJoin {
           name = "herdr-nexus-v1";

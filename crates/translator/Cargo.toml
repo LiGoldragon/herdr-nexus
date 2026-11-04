@@ -58,3 +58,8 @@ required-features = ["text"]
 name = "herdr-translator"
 path = "src/bin/herdr-translator.rs"
 required-features = ["text"]
+
+[[bin]]
+name = "herdr-pair"
+path = "src/bin/herdr-pair.rs"
+required-features = ["text"]
