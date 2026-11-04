@@ -35,18 +35,18 @@ The rerunnable proof is `proof/live-herdr.sh`. It owns a unique directory,
 two Herdr sessions, two workspaces, their panes, and only the processes it
 starts. Its exit trap closes those resources and prints their identities.
 
-Validated candidate:
+Current remotely checked candidate (the change after the live run adds only the controlled stale-poll regression and this record):
 
 ```
-/nix/store/vkq4q1ii9wbfz96mfziz0lbn8w9lanz8-herdr-nexus-v1
+/nix/store/hzvd10rigadqxllcm7zab1yckyx6bc9z-herdr-nexus-v1
 ```
 
-Invocation:
+Rerun invocation:
 
 ```sh
 PROOF_BASE=/tmp/herdr-v1-proof-af8fe3 \
   ./proof/live-herdr.sh \
-  /nix/store/vkq4q1ii9wbfz96mfziz0lbn8w9lanz8-herdr-nexus-v1
+  /nix/store/hzvd10rigadqxllcm7zab1yckyx6bc9z-herdr-nexus-v1
 ```
 
 The proof observed both owners reach `Ready`, rejected a malformed meta
@@ -72,6 +72,4 @@ cleanup owns base=/tmp/herdr-v1-proof-af8fe3 sessions=v1proof-li-1495601-one v1p
 deleting owned fixture directory /tmp/herdr-v1-proof-af8fe3
 ```
 
-The remote Nix test derivation passed core 8, daemon 8, translator 8,
-integration 1, runner 6, server 2, and wire 4 tests. The pinned Ethos Zero
-operation, memory, and emission regeneration checks also passed.
+The current remote Nix test derivation passed, including the controlled stale List/Close race: terminal Dead was delivered exactly once and the released pre-Close List produced no later Open. The aggregate pinned Ethos Zero regeneration check also passed.

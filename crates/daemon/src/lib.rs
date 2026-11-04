@@ -1939,6 +1939,78 @@ mod tests {
     }
 
     #[test]
+    fn stale_poll_finishing_after_close_cannot_reopen_the_pane() {
+        use signal::FrameReading;
+        use signal_herdr_nexus::{
+            AgentKind, AgentName, Command, Executable, Label, Outcome, Program, Query, Response,
+            Root, Start_Data, State, Workspace,
+        };
+        let pane = pane_for("stale-close", "pane");
+        let (poll_started_tx, poll_started_rx) = std::sync::mpsc::channel();
+        let (release_poll_tx, release_poll_rx) = std::sync::mpsc::channel();
+        let emitter = Arc::new(StaleListEmitter {
+            pane: pane.clone(),
+            list_started: poll_started_tx,
+            release_list: std::sync::Mutex::new(release_poll_rx),
+        });
+        let dispatcher = Arc::new(Dispatcher::with_emitter(&test_paths(), emitter));
+        let configuration = test_configuration();
+        assert!(matches!(
+            dispatcher.dispatch(
+                Query::Create(Workspace {
+                    session: pane.session.clone(),
+                    root: Root("/tmp".into()),
+                    variable_vector: Vec::new(),
+                }),
+                Arc::clone(&configuration),
+            ),
+            Response::Created(Outcome::Created(_))
+        ));
+        assert!(matches!(
+            dispatcher.dispatch(
+                Query::Start(Start_Data {
+                    pane: pane.clone(),
+                    command: Command {
+                        agent_name: AgentName("probe".into()),
+                        agent_kind: AgentKind::Codex,
+                        executable: Executable::Explicit(Program("/bin/true".into())),
+                        string_vector: Vec::new(),
+                    },
+                    label: Label("flow".into()),
+                }),
+                Arc::clone(&configuration),
+            ),
+            Response::Started(Outcome::Done)
+        ));
+
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        client.set_read_timeout(Some(Duration::from_millis(250))).expect("timeout");
+        dispatcher
+            .subscribe(server, pane.session.clone(), Arc::clone(&configuration))
+            .expect("subscribe");
+        let _ = read_subscription(&mut client); // acknowledgement
+        let _ = read_subscription(&mut client); // current Busy
+        poll_started_rx.recv().expect("old poll reached external List");
+
+        assert!(matches!(
+            dispatcher.dispatch(Query::Close(pane.clone()), Arc::clone(&configuration)),
+            Response::Closed(Outcome::Done)
+        ));
+        assert!(matches!(
+            read_subscription(&mut client),
+            herdr_nexus_wire::public_call::Response::Answered(ref output)
+                if matches!(&output.0, Response::Changed(change) if change.pane == pane && change.state == State::Dead)
+        ));
+        release_poll_tx.send(()).expect("release stale poll");
+
+        client.set_read_timeout(Some(Duration::from_millis(80))).expect("short timeout");
+        assert!(
+            client.read_frame(signal::FrameCapacity::from(4096)).is_err(),
+            "the stale pre-Close List must not publish Open after terminal Dead"
+        );
+    }
+
+    #[test]
     fn bounded_subscriber_queue_disconnects_only_the_overflowing_peer() {
         use signal_herdr_nexus::{Outcome, Response};
         let slow = SubscriberQueue::new(1);
