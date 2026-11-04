@@ -25,6 +25,12 @@ fn execute(config:meta_signal_herdr_nexus::Configuration, herdr:Herdr)->External
  argv.splice(0..0, ["--session".into(), herdr.session.0.clone()]);
  let output=match run_command(&config.herdr_executable.0,&argv,timeout){Ok(v)=>v,Err(RunError::Timeout)=>return ExternalOutcome::Uncertain,Err(RunError::Io(e))=>return refused("process_io",None,e.to_string())};
  if !output.status.success(){return refused("process_refused",Some(output.status.code().unwrap_or(-1) as i64),String::from_utf8_lossy(&output.stderr).into_owned());}
+ if kind=="list" {
+  let mut agent_argv=vec!["--session".into(),herdr.session.0.clone(),"agent".into(),"list".into()];
+  let agents=match run_command(&config.herdr_executable.0,&agent_argv,timeout){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain};
+  if !agents.status.success(){return refused("agent_list_failed",Some(agents.status.code().unwrap_or(-1) as i64),String::from_utf8_lossy(&agents.stderr).into_owned());}
+  return parse_list_join(&output.stdout,&agents.stdout,herdr.session);
+ }
  parse_success(&output.stdout,kind,pane,herdr.session)
 }
 fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
@@ -34,6 +40,13 @@ fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
  Verb::Keys(d)=>(vec!["pane".into(),"send-keys".into(),d.pane_id.0.clone()],Some(d.pane_id.0.clone()),"keys"),
  Verb::PaneClose(id)=>(vec!["pane".into(),"close".into(),id.0.clone()],Some(id.0.clone()),"close"),
  Verb::PaneList=>(vec!["pane".into(),"list".into()],None,"list")}}
+
+fn parse_list_join(panes:&[u8],agents:&[u8],session:signal_herdr_nexus::Session)->ExternalOutcome {
+ let p:serde_json::Value=match serde_json::from_slice(panes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; let a:serde_json::Value=match serde_json::from_slice(agents){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain};
+ if p.pointer("/result/type").and_then(|v|v.as_str())!=Some("pane_list") || a.pointer("/result/type").and_then(|v|v.as_str())!=Some("agent_list"){return ExternalOutcome::Uncertain}
+ let Some(ps)=p.pointer("/result/panes").and_then(|v|v.as_array()) else{return ExternalOutcome::Uncertain}; let Some(as_)=a.pointer("/result/agents").and_then(|v|v.as_array()) else{return ExternalOutcome::Uncertain};
+ let mut out=Vec::new(); for pane in ps { let Some(id)=pane.get("pane_id").and_then(|v|v.as_str()) else{return ExternalOutcome::Uncertain}; let ag=as_.iter().find(|x|x.get("pane_id").and_then(|v|v.as_str())==Some(id)); let Some(ag)=ag else { return ExternalOutcome::Uncertain; }; let status=ag.get("agent_status").and_then(|v|v.as_str()).unwrap_or(""); let ready=ag.get("interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false); let state=if status=="working"||status=="blocked"{State::Busy}else if (status=="idle"||status=="done")&&ready{State::Idle}else{State::Open}; out.push(emission_herdr_nexus::PaneObservation{pane:Pane{session:session.clone(),pane_id:PaneId(id.into())},state}); } ExternalOutcome::Listed(out)
+}
 fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){
   let expected=match kind {"prompt"=>"agent_prompted","keys"=>"keys_sent","close"=>"pane_closed",_=>""};
   if value.pointer("/result/type").and_then(|v|v.as_str())==Some(expected){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}
