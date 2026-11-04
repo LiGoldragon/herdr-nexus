@@ -35,7 +35,8 @@ fn argv_for(h:&Herdr)->(Vec<String>,Option<String>,&'static str){match &h.verb{
  Verb::PaneList=>(vec!["pane".into(),"list".into()],None,"list")}}
 fn parse_success(bytes:&[u8],kind:&str,pane:Option<String>,session:signal_herdr_nexus::Session)->ExternalOutcome{let value:serde_json::Value=match serde_json::from_slice(bytes){Ok(v)=>v,Err(_)=>return ExternalOutcome::Uncertain}; if kind=="list"{return parse_list(&value,session)} if kind=="start"&&!value.pointer("/result/agent/interactive_ready").and_then(|v|v.as_bool()).unwrap_or(false){return ExternalOutcome::Uncertain} if kind=="workspace"{if let Some(id)=value.pointer("/result/root_pane/pane_id").and_then(|v|v.as_str()){return ExternalOutcome::Created(Pane{session,pane_id:PaneId(id.into())})}} if pane.is_some(){ExternalOutcome::Done}else{ExternalOutcome::Uncertain}}
 fn parse_list(value:&serde_json::Value,session:signal_herdr_nexus::Session)->ExternalOutcome {
- let Some(items)=value.pointer("/result").and_then(|v|v.as_array()) else { return ExternalOutcome::Uncertain };
+ let items_value=value.pointer("/result/panes").or_else(|| value.pointer("/result"));
+ let Some(items)=items_value.and_then(|v|v.as_array()) else { return ExternalOutcome::Uncertain };
  let mut observations=Vec::with_capacity(items.len());
  for item in items {
   let Some(id)=item.get("pane_id").and_then(|v|v.as_str()) else { return ExternalOutcome::Uncertain };
