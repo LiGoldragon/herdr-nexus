@@ -15,16 +15,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
-registry=$base/registry.datom
-
 start_pair() {
-  local directory=$1 generation=$2
-  mkdir "$directory"
-  printf '[ { one %s } ]\n' "$directory" >"$registry.new"
-  mv "$registry.new" "$registry"
-  "$package/bin/herdr-pair" "$registry" one \
-    "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-    5000 8388608 25 1048576 64 >"$base/$generation.log" 2>&1 &
+  local generation=$1
+  export XDG_RUNTIME_DIR=$base/$generation/run
+  export HOME=$base/$generation/home
+  directory=$XDG_RUNTIME_DIR/metaflow/one
+  state=$HOME/.local/state/metaflow/one
+  mkdir -p "$directory" "$state"
+  place="{ one $directory $state }"
+  "$package/bin/herdr-pair" "$place" >"$base/$generation.log" 2>&1 &
   pair_pid=$!
   launchers+=("$pair_pid")
   child_pids=()
@@ -35,7 +34,7 @@ start_pair() {
   done
   [[ ${#child_pids[@]} -eq 2 ]]
   [[ -S $directory/herdr-meta-translator.sock ]]
-  "$package/bin/herdr-nexus-meta" "$registry" one 'Configure.Polling.100' \
+  "$package/bin/herdr-nexus-meta" one 'Configure.Polling.100' \
     | grep -q Configured
 }
 
@@ -54,11 +53,11 @@ stop_one_and_require_survivor_exit() {
   return 1
 }
 
-start_pair "$base/first" first
+start_pair first
 old_children=("${child_pids[@]}")
 stop_one_and_require_survivor_exit
 
-start_pair "$base/second" second
+start_pair second
 for old in "${old_children[@]}"; do
   for fresh in "${child_pids[@]}"; do
     [[ $old != "$fresh" ]]

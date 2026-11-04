@@ -10,7 +10,7 @@ use crate::public_payload;
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub struct Call_Data {
-    pub caller: transport::Caller,
+    pub caller: shared_translator::Caller,
     pub input: public_payload::Input,
 }
 #[rustfmt::skip]

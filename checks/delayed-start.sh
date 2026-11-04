@@ -12,11 +12,13 @@ cleanup() {
 }
 trap cleanup EXIT
 
-directory=$base/main
+export XDG_RUNTIME_DIR=$base/run
+export HOME=$base/home
+directory=$XDG_RUNTIME_DIR/metaflow/one
+state=$HOME/.local/state/metaflow/one
 workspace=$base/workspace
-mkdir "$directory" "$workspace"
-registry=$base/registry.datom
-printf '[ { one %s } ]\n' "$directory" >"$registry"
+mkdir -p "$directory" "$state" "$workspace"
+place="{ one $directory $state }"
 
 {
 printf '#!%s\n' "$(command -v bash)"
@@ -36,9 +38,7 @@ EOF
 } >"$base/herdr-fixture"
 chmod +x "$base/herdr-fixture"
 
-"$package/bin/herdr-pair" "$registry" one \
-  "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-  50 8388608 25 1048576 64 >"$base/pair.log" 2>&1 &
+"$package/bin/herdr-pair" "$place" >"$base/pair.log" 2>&1 &
 pair=$!
 for _ in $(seq 1 100); do
   [[ -S $directory/herdr-meta-translator.sock && -S $directory/herdr-meta.sock ]] && break
@@ -49,25 +49,25 @@ done
 
 meta="$package/bin/herdr-nexus-meta"
 public="$package/bin/herdr-nexus"
-"$meta" "$registry" one "Configure.HerdrPath.$base/herdr-fixture" >/dev/null
-"$meta" "$registry" one 'Configure.CallTimeout.50' >/dev/null
-"$meta" "$registry" one 'Configure.OutputLimit.1048576' >/dev/null
-"$meta" "$registry" one 'Configure.TextBudget.{ 1048576 64 }' >/dev/null
-"$meta" "$registry" one 'Configure.StartTimeout.1000' >/dev/null
-"$meta" "$registry" one 'Configure.Polling.100' >/dev/null
-"$meta" "$registry" one 'Configure.FrameCapacity.8388608' >/dev/null
-"$meta" "$registry" one 'Configure.SubscriberCapacity.8' >/dev/null
-"$meta" "$registry" one 'Configure.TransportTimeout.50' | grep -q Ready
+"$meta" one "Configure.HerdrPath.$base/herdr-fixture" >/dev/null
+"$meta" one 'Configure.CallTimeout.50' >/dev/null
+"$meta" one 'Configure.OutputLimit.1048576' >/dev/null
+"$meta" one 'Configure.TextBudget.{ 1048576 64 }' >/dev/null
+"$meta" one 'Configure.StartTimeout.1000' >/dev/null
+"$meta" one 'Configure.Polling.100' >/dev/null
+"$meta" one 'Configure.FrameCapacity.8388608' >/dev/null
+"$meta" one 'Configure.SubscriberCapacity.8' >/dev/null
+"$meta" one 'Configure.TransportTimeout.50' | grep -q Ready
 
-"$public" "$registry" one "Create.{ main $workspace [] }" | grep -q 'Created.Created'
+"$public" one "Create.{ main $workspace [] }" | grep -q 'Created.Created'
 began=$(date +%s%3N)
-"$public" "$registry" one 'Start.{ { main w:p } { probe Codex Configured [] } label }' \
+"$public" one 'Start.{ { main w:p } { probe Codex Configured [] } label }' \
   | grep -q 'Started.Done'
 ended=$(date +%s%3N)
 (( ended - began >= 150 ))
 
-"$meta" "$registry" one 'Configure.StartTimeout.40' >/dev/null
-"$public" "$registry" one 'Start.{ { main w:p } { probe Codex Configured [] } label }' \
+"$meta" one 'Configure.StartTimeout.40' >/dev/null
+"$public" one 'Start.{ { main w:p } { probe Codex Configured [] } label }' \
   | grep -q Uncertain
 
 echo DELAYED_START_OK

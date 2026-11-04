@@ -24,7 +24,7 @@ rev = "8d78cd8"
 [dependencies.shared-translator]
 package = "translator"
 git = "https://github.com/LiGoldragon/translator"
-rev = "2676fd0cb0ced3316dc151f73a9f59856e15e62d"
+rev = "751c326f11c874b527a69ce6377ce9e196aeca37"
 features = ["unix"]
 
 
@@ -40,7 +40,7 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "8dd261e"
+rev = "1c85502"
 features = ["datom"]
 
 [[bin]]

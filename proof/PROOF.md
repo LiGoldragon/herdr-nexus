@@ -1,5 +1,27 @@
 # Installed-front Herdr v1 proof
 
+## Fixed Place first-launch proof — 2026-11-04
+
+Remote Nix built `/nix/store/slq0b02i6wrqlm7xgyidrriv4vkfn9bk-herdr-nexus-v1`.
+The public launcher accepted exactly one inline Place:
+
+```sh
+herdr-pair '{ one /run/user/1000/metaflow/one /home/one/.local/state/metaflow/one }'
+```
+
+The installed public and meta clients used `herdr-nexus one '<Datom>'` and
+`herdr-nexus-meta one '<Datom>'`; they resolved the same runtime from
+`XDG_RUNTIME_DIR` and `HOME` without a registry file. The proof launched two
+Places, reached both readiness gates, created, started, listed, subscribed,
+prompted, pressed, closed, and cleaned both owned runtimes and state fixtures.
+Its final witness was `LIVE_HERDR_PROOF_OK`.
+
+Remote `test`, aggregate generated-contract, `delayed-start`,
+`paired-relaunch`, and `meta-connection-isolation` checks passed. The last
+check retained the R1 proof: a direct unauthorized core-meta connect/close and
+malformed and partial-timeout meta-front frames were isolated before later
+valid meta and ordinary calls on the same pair.
+
 ## Paired front proof — 2026-11-04
 
 Remote Nix built `/nix/store/lxdbk269775akwn0cbdkdh9lfyrjhfyy-herdr-nexus-v1`.

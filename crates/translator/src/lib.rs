@@ -109,7 +109,7 @@ impl std::fmt::Display for ClientError {
 impl std::error::Error for ClientError {}
 
 #[cfg(feature = "text")]
-pub use shared_translator::{placement, registry};
+pub use shared_translator::placement;
 
 /// The one construction of a textualization budget used by every translator
 /// entry point and request decoder.

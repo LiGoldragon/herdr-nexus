@@ -1,4 +1,4 @@
-use crate::transport_types::{Caller, Kind, Lane};
+use crate::transport_types::{Kind, Lane};
 use std::io::{Read, Write};
 
 pub const HEADER_BYTES: usize = shared_translator::unix::HEADER_BYTES;
@@ -147,12 +147,11 @@ pub fn write_frame_witness(
     ).map_err(|failure| IncompleteSubmission { written: failure.written, error: failure.error.into() })
 }
 
-pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<Caller, TransportError> {
+pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<shared_translator::Caller, TransportError> {
     let credentials = shared_translator::unix::peer_credentials(stream)?;
-    Ok(Caller {
-        user_id: credentials.user_id,
-        group_id: credentials.group_id,
+    Ok(shared_translator::Caller {
         process_id: credentials.process_id,
+        user_id: credentials.user_id,
     })
 }
 

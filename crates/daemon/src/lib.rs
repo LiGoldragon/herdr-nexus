@@ -16,7 +16,7 @@ pub struct SocketPaths {
 
 impl From<&shared_translator::placement::Place> for SocketPaths {
     fn from(place: &shared_translator::placement::Place) -> Self {
-        let directory = std::path::PathBuf::from(&place.directory.0);
+        let directory = shared_translator::placement::runtime_path(place);
         let names = herdr_nexus_wire::socket_names();
         Self {
             public: directory.join(names.public_nexus_socket.0),
@@ -208,8 +208,8 @@ impl PublicAuthority {
 
 pub fn principal_for(
     authority: &PublicAuthority,
-    actual: &herdr_nexus_wire::transport_types::Caller,
-    serialized: &herdr_nexus_wire::transport_types::Caller,
+    actual: &shared_translator::Caller,
+    serialized: &shared_translator::Caller,
 ) -> std::io::Result<shared_translator::Principal> {
     match authority {
         PublicAuthority::Translator => Ok(shared_translator::Principal::Login(
@@ -299,7 +299,7 @@ where
     Ok(())
 }
 
-pub fn same_login(caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
+pub fn same_login(caller: &shared_translator::Caller) -> bool {
     caller.user_id.0 == i64::from(nix::unistd::getuid().as_raw())
 }
 
@@ -1481,19 +1481,15 @@ impl BoundPeer {
             .map(|live| Self { live, generation: 0 })
     }
 
-    fn matches(&self, caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
-        self.live.matches(&shared_translator::unix::PeerCredentials {
-            user_id: caller.user_id.clone(),
-            group_id: caller.group_id.clone(),
-            process_id: caller.process_id.clone(),
-        })
+    fn matches(&self, caller: &shared_translator::Caller) -> bool {
+        self.live.matches_caller(caller)
     }
 }
 
 impl ConfigurationStore {
     fn peer_for(
         &self,
-        caller: &herdr_nexus_wire::transport_types::Caller,
+        caller: &shared_translator::Caller,
     ) -> Option<(shared_translator::PeerId, u64)> {
         let peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
         peers.iter().find_map(|(peer_id, peer)| {
@@ -1858,9 +1854,8 @@ mod tests {
             Response::Configured(_)
         ));
         assert_eq!(
-            store.peer_for(&herdr_nexus_wire::transport_types::Caller {
+            store.peer_for(&shared_translator::Caller {
                 user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
-                group_id: shared_translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
                 process_id: ProcessId(i64::from(std::process::id())),
             }),
             Some((peer_id.clone(), 1))
@@ -1901,9 +1896,8 @@ mod tests {
         child.kill().expect("terminate fixture child");
         child.wait().expect("reap fixture child");
         assert_eq!(
-            store.peer_for(&herdr_nexus_wire::transport_types::Caller {
+            store.peer_for(&shared_translator::Caller {
                 user_id: identity.user_id,
-                group_id: shared_translator::GroupId(i64::from(nix::unistd::getgid().as_raw())),
                 process_id: identity.process_id,
             }),
             None
@@ -1912,13 +1906,12 @@ mod tests {
 
     #[test]
     fn configured_peer_cannot_forge_the_serialized_caller() {
-        use shared_translator::{GroupId, PeerId, ProcessId, UserId};
-        let actual = herdr_nexus_wire::transport_types::Caller {
+        use shared_translator::{PeerId, ProcessId, UserId};
+        let actual = shared_translator::Caller {
             user_id: UserId(1000),
-            group_id: GroupId(1000),
             process_id: ProcessId(42),
         };
-        let forged = herdr_nexus_wire::transport_types::Caller {
+        let forged = shared_translator::Caller {
             process_id: ProcessId(43),
             ..actual.clone()
         };
@@ -1962,7 +1955,7 @@ mod tests {
     #[test]
     fn subscription_registration_rejects_a_rebound_generation() {
         use core_meta_herdr_nexus::CoreSet;
-        use shared_translator::{GroupId, PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        use shared_translator::{PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
         let store = ConfigurationStore::default();
         let peer_id = PeerId("stable".into());
         let identity = PeerIdentity {
@@ -1971,9 +1964,8 @@ mod tests {
         };
         let binding = PeerBinding { peer_id: peer_id.clone(), peer_identity: identity.clone() };
         assert!(matches!(store.configure(CoreSet::Peer(binding.clone()), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
-        let caller = herdr_nexus_wire::transport_types::Caller {
+        let caller = shared_translator::Caller {
             user_id: identity.user_id,
-            group_id: GroupId(i64::from(nix::unistd::getgid().as_raw())),
             process_id: identity.process_id,
         };
         let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
@@ -1990,7 +1982,7 @@ mod tests {
     #[test]
     fn rebind_cannot_cross_validated_subscription_registration() {
         use core_meta_herdr_nexus::CoreSet;
-        use shared_translator::{GroupId, PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        use shared_translator::{PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
         use std::sync::{Arc, Barrier, mpsc};
         use std::time::Duration;
 
@@ -2008,9 +2000,8 @@ mod tests {
             store.configure(CoreSet::Peer(binding.clone()), || Ok(())),
             core_meta_herdr_nexus::Response::Configured(_)
         ));
-        let caller = herdr_nexus_wire::transport_types::Caller {
+        let caller = shared_translator::Caller {
             user_id: identity.user_id,
-            group_id: GroupId(i64::from(nix::unistd::getgid().as_raw())),
             process_id: identity.process_id,
         };
         let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
@@ -2959,7 +2950,7 @@ mod tests {
             user_id: UserId(actual.user_id.0),
             process_id: ProcessId(actual.process_id.0),
         }).expect("capture current process");
-        let mismatched = herdr_nexus_wire::transport_types::Caller {
+        let mismatched = shared_translator::Caller {
             process_id: ProcessId(actual.process_id.0 + 1),
             ..actual
         };

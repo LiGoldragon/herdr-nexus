@@ -1,4 +1,4 @@
-use herdr_nexus_translator::{maximum_text_budget, registry};
+use herdr_nexus_translator::maximum_text_budget;
 use herdr_nexus_translator::transport_types::{
     Admission, CoreBootstrap, FrameCapacityBytes, FrameDeadlineMilliseconds,
     RetryDelayMilliseconds, TranslatorBootstrap,
@@ -6,7 +6,7 @@ use herdr_nexus_translator::transport_types::{
 use shared_translator::{PeerIdentity, ProcessId, UserId};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use shared_translator::{FrameCapacity, FrameWriting, Signalizable};
-use std::{env, fs, io};
+use std::{env, io};
 
 fn integer(value: Option<String>, name: &str) -> Result<i64, Box<dyn std::error::Error>> {
     value.ok_or_else(|| name.to_owned())?.parse().map_err(Into::into)
@@ -14,8 +14,7 @@ fn integer(value: Option<String>, name: &str) -> Result<i64, Box<dyn std::error:
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = env::args().skip(1);
-    let registry_path = arguments.next().ok_or("REGISTRY_PATH")?;
-    let name = arguments.next().ok_or("NAME")?;
+    let place_text = arguments.next().ok_or("PLACE")?;
     let target = arguments.next().ok_or("TARGET (Core or Translator)")?;
     let peer_identity = PeerIdentity {
         user_id: UserId(integer(arguments.next(), "PEER_USER_ID")?),
@@ -28,9 +27,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     herdr_nexus_wire::ValidAdmission::try_from(&admission)
         .map_err(|message| format!("invalid admission: {message}"))?;
-    let registry = registry::decode(&fs::read_to_string(registry_path)?, &mut maximum_text_budget())
+    let place = shared_translator::decode::<shared_translator::Place>(
+        &place_text,
+        &mut maximum_text_budget(),
+    )
         .map_err(|error| format!("{error:?}"))?;
-    let place = registry::select(&registry, &name).map_err(|error| format!("{error:?}"))?.clone();
+    shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
     let mut output = io::stdout();
     match target.as_str() {
         "Core" => {

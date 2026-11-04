@@ -1,4 +1,4 @@
-use herdr_nexus_translator::{maximum_text_budget, registry, transport_types::*};
+use herdr_nexus_translator::{maximum_text_budget, transport_types::*};
 use meta_signal_herdr_nexus::{BudgetValue, DepthLimit, NodeLimit};
 use nix::sys::signal::{kill, Signal};
 use nix::sys::wait::waitpid;
@@ -41,8 +41,7 @@ fn stop(child: &mut Child) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut arguments = std::env::args().skip(1);
-    let registry_path = arguments.next().ok_or("REGISTRY_PATH")?;
-    let name = arguments.next().ok_or("NAME")?;
+    let place_text = arguments.next().ok_or("PLACE")?;
     let core_executable = arguments.next().ok_or("CORE_EXECUTABLE")?;
     let translator_executable = arguments.next().ok_or("TRANSLATOR_EXECUTABLE")?;
     let admission = Admission {
@@ -68,14 +67,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if arguments.next().is_some() {
         return Err("unexpected launcher argument".into());
     }
-    let registry_text = std::fs::read_to_string(registry_path)?;
-    let registry = registry::decode(&registry_text, &mut maximum_text_budget())
+    let place = shared_translator::decode::<shared_translator::Place>(
+        &place_text,
+        &mut maximum_text_budget(),
+    )
         .map_err(|error| format!("{error:?}"))?;
-    let place = registry::select(&registry, &name)
-        .map_err(|error| format!("{error:?}"))?
-        .clone();
-    if !std::path::Path::new(&place.directory.0).is_dir() {
-        return Err(format!("metaflow directory does not exist: {}", place.directory.0).into());
+    shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
+    if !shared_translator::placement::runtime_path(&place).is_dir() {
+        return Err(format!("metaflow runtime does not exist: {}", place.runtime.0).into());
+    }
+    if !shared_translator::placement::state_path(&place).is_dir() {
+        return Err(format!("metaflow state does not exist: {}", place.state.0).into());
     }
 
     let mut core = Command::new(core_executable)

@@ -8,14 +8,6 @@ use shared_translator::placement::Place;
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Caller {
-    pub user_id: shared_translator::UserId,
-    pub group_id: shared_translator::GroupId,
-    pub process_id: shared_translator::ProcessId,
-}
-#[rustfmt::skip]
-#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
 pub enum Lane {
     PublicText,
     MetaText,

@@ -48,10 +48,24 @@
           src = source;
           inherit cargoArtifacts;
           cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-nexus --bin herdr-nexus-meta --bin herdr-nexus-place --bin herdr-pair";
+          postInstall = ''
+            mkdir -p "$out/libexec"
+            mv "$out/bin/herdr-pair" "$out/libexec/herdr-pair-launcher"
+          '';
         };
+        pair = pkgs.writeShellScriptBin "herdr-pair" ''
+          if [[ $# -ne 1 ]]; then
+            echo "usage: herdr-pair '<Place>'" >&2
+            exit 64
+          fi
+          exec ${cli}/libexec/herdr-pair-launcher "$1" \
+            ${daemon}/bin/herdr-nexus-daemon \
+            ${translator}/bin/herdr-translator \
+            70000 8388608 25 1048576 64
+        '';
         default = pkgs.symlinkJoin {
           name = "herdr-nexus-v1";
-          paths = [ daemon translator cli ];
+          paths = [ daemon translator cli pair ];
         };
         };
         checks = rec {

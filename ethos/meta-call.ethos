@@ -1,5 +1,5 @@
 Signal
-[ transport:[ Caller ]                                 ; imports
+[ shared_translator:[ Caller ]                         ; imports
   meta_payload:[ Input Output ] ]
 [ Call.{ Caller Input } ]                              ; inputs
 [ Answered.Output                                      ; outputs

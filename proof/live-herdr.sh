@@ -11,11 +11,13 @@ if [[ -n ${PROOF_BASE:-} ]]; then
 else
   base=$(mktemp -d "/tmp/${tag}.XXXXXX")
 fi
-one="$base/one"
-two="$base/two"
-mkdir -p "$one" "$two" "$base/work-one" "$base/work-two"
-registry="$base/registry.datom"
-printf '[ { one %s } { two %s } ]\n' "$one" "$two" > "$registry"
+export XDG_RUNTIME_DIR=$base/run
+export HOME=$base/home
+one="$XDG_RUNTIME_DIR/metaflow/one"
+two="$XDG_RUNTIME_DIR/metaflow/two"
+state_one="$HOME/.local/state/metaflow/one"
+state_two="$HOME/.local/state/metaflow/two"
+mkdir -p "$one" "$two" "$state_one" "$state_two" "$base/work-one" "$base/work-two"
 pids=()
 sessions=("${tag}-one" "${tag}-two")
 panes=()
@@ -47,11 +49,11 @@ trap 'exit 143' TERM
 
 cat > "$base/herdr" <<WRAPPER
 #!/usr/bin/env bash
-exec "$package/bin/herdr-nexus" "$registry" "\$@"
+exec "$package/bin/herdr-nexus" "\$@"
 WRAPPER
 cat > "$base/herdr-meta" <<WRAPPER
 #!/usr/bin/env bash
-exec "$package/bin/herdr-nexus-meta" "$registry" "\$@"
+exec "$package/bin/herdr-nexus-meta" "\$@"
 WRAPPER
 chmod +x "$base/herdr" "$base/herdr-meta"
 public="$base/herdr"
@@ -59,12 +61,11 @@ meta="$base/herdr-meta"
 
 start_metaflow() {
   local name=$1
-  "$package/bin/herdr-pair" "$registry" "$name" \
-    "$package/bin/herdr-nexus-daemon" "$package/bin/herdr-translator" \
-    70000 8388608 25 1048576 64 >"$base/$name-pair.log" 2>&1 &
-  pids+=("$!")
-  local directory
+  local directory state
   directory=$([[ $name == one ]] && printf %s "$one" || printf %s "$two")
+  state=$([[ $name == one ]] && printf %s "$state_one" || printf %s "$state_two")
+  "$package/bin/herdr-pair" "{ $name $directory $state }" >"$base/$name-pair.log" 2>&1 &
+  pids+=("$!")
   for _ in $(seq 1 100); do
     [[ -S "$directory/herdr-meta-translator.sock" && -S "$directory/herdr-meta.sock" ]] && return
     sleep .05
@@ -123,7 +124,7 @@ agent="v1proof$$"
 "$public" two "List.${sessions[1]}" >"$base/list-two.out" & list_two=$!
 wait "$list_one" "$list_two"
 grep -q "$pane_one" "$base/list-one.out"
-grep -q 'Listed.Listed.\[\]' "$base/list-two.out"
+grep -q "$pane_two" "$base/list-two.out"
 timeout 45 "$public" one "Subscribe.${sessions[0]}" >"$base/subscription.out" & subscription=$!
 for _ in $(seq 1 100); do grep -q Subscribed "$base/subscription.out" 2>/dev/null && break; sleep .05; done
 grep -q Subscribed "$base/subscription.out"
