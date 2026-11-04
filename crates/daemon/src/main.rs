@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(
         bootstrap.paths(),
         bootstrap.configuration_store(),
+        bootstrap.admission(),
     ));
 
     let meta = Arc::clone(&bootstrap);

@@ -156,6 +156,10 @@ impl Bootstrap {
     pub fn paths(&self) -> &SocketPaths {
         &self.paths
     }
+
+    pub fn admission(&self) -> herdr_nexus_wire::ValidAdmission {
+        self.admission
+    }
 }
 
 fn require_peer(
@@ -256,6 +260,7 @@ pub enum EmissionResult {
 
 struct SocketEmitter {
     translator_socket: std::path::PathBuf,
+    admission: herdr_nexus_wire::ValidAdmission,
 }
 
 struct DispatcherState {
@@ -391,7 +396,11 @@ fn operation(
 }
 
 impl Dispatcher {
-    pub fn new(paths: &SocketPaths, configuration: Arc<ConfigurationStore>) -> Self {
+    pub fn new(
+        paths: &SocketPaths,
+        configuration: Arc<ConfigurationStore>,
+        emission_admission: herdr_nexus_wire::ValidAdmission,
+    ) -> Self {
         Self {
             state: std::sync::Mutex::new(DispatcherState {
                 core: herdr_nexus_core::Core::new(herdr_nexus_core::InMemory::default()),
@@ -401,6 +410,7 @@ impl Dispatcher {
             }),
             emitter: Arc::new(SocketEmitter {
                 translator_socket: paths.translator.clone(),
+                admission: emission_admission,
             }),
             subscriptions: std::sync::Mutex::new(SubscriptionHub::default()),
             next_subscription_generation: std::sync::atomic::AtomicU64::new(1),
@@ -419,7 +429,14 @@ impl Dispatcher {
                 transport_timeout: Duration::from_millis(30),
                 subscriber_capacity: 8,
             }));
-        let mut dispatcher = Self::new(paths, configuration);
+        let mut dispatcher = Self::new(
+            paths,
+            configuration,
+            herdr_nexus_wire::ValidAdmission {
+                deadline: Duration::from_millis(30),
+                frame_capacity: 4096,
+            },
+        );
         dispatcher.emitter = emitter;
         dispatcher
     }
@@ -860,7 +877,7 @@ impl Dispatcher {
 impl ExternalEmitter for SocketEmitter {
     fn emit(
         &self,
-        configuration: &RuntimeConfiguration,
+        _configuration: &RuntimeConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult {
         use herdr_nexus_wire::transport_types::{Kind, Lane};
@@ -869,7 +886,7 @@ impl ExternalEmitter for SocketEmitter {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
-        let mut stream = match DeadlineStream::new(stream, configuration.transport_timeout) {
+        let mut stream = match DeadlineStream::new(stream, self.admission.deadline) {
             Ok(stream) => stream,
             Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
         };
@@ -887,7 +904,7 @@ impl ExternalEmitter for SocketEmitter {
                 kind: Kind::Request,
                 payload: request.bytes().to_vec(),
             },
-            configuration.frame_capacity_bytes,
+            self.admission.frame_capacity,
         ) {
             return unavailable_transport(
                 &self.translator_socket,
@@ -900,7 +917,7 @@ impl ExternalEmitter for SocketEmitter {
         let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let body = herdr_nexus_wire::frame::read_frame(
                 &mut stream,
-                configuration.frame_capacity_bytes,
+                self.admission.frame_capacity,
             )?;
             if body.lane != Lane::EmissionSignal || body.kind != Kind::Answered {
                 return Err("translator returned a non-answer emission frame".into());
