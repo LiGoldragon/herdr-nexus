@@ -128,6 +128,13 @@
             ${pkgs.bash}/bin/bash "$script" "$package"
             touch "$out"
           '';
+          delayed-start = pkgs.runCommand "herdr-delayed-start" {
+            package = self.packages.${system}.default;
+            script = ./checks/delayed-start.sh;
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$package"
+            touch "$out"
+          '';
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust.toolchain ];
