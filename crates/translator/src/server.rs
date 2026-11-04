@@ -28,30 +28,20 @@ pub enum Endpoint {
 }
 
 struct NexusPeer {
-    identity: shared_translator::PeerIdentity,
-    pidfd: std::os::fd::OwnedFd,
+    live: shared_translator::unix::LivePeer,
 }
 
 impl NexusPeer {
     fn capture(identity: shared_translator::PeerIdentity) -> std::io::Result<Self> {
-        let pid = i32::try_from(identity.process_id.0)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-            .ok_or_else(|| std::io::Error::other("paired Nexus process id is invalid"))?;
-        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
-        Ok(Self { identity, pidfd })
+        shared_translator::unix::LivePeer::capture(identity).map(|live| Self { live })
     }
 
     fn matches(&self, caller: &crate::transport_types::Caller) -> bool {
-        use std::os::fd::AsFd;
-        if self.identity.user_id != caller.user_id || self.identity.process_id != caller.process_id {
-            return false;
-        }
-        let mut poll = [nix::poll::PollFd::new(
-            self.pidfd.as_fd(),
-            nix::poll::PollFlags::POLLIN,
-        )];
-        matches!(nix::poll::poll(&mut poll, 0_u8), Ok(0))
+        self.live.matches(&shared_translator::unix::PeerCredentials {
+            user_id: caller.user_id.clone(),
+            group_id: caller.group_id.clone(),
+            process_id: caller.process_id.clone(),
+        })
     }
 }
 
@@ -1495,7 +1485,7 @@ mod tests {
             user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
             process_id: ProcessId(i64::from(std::process::id())),
         }).expect("current pidfd");
-        expected.identity.process_id = ProcessId(i64::from(std::process::id()) + 1);
+        expected.live.identity.process_id = ProcessId(i64::from(std::process::id()) + 1);
         serve_one_paired(
             &mut server,
             &TranslatorConfiguration::default(),

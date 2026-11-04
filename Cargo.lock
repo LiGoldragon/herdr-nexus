@@ -301,7 +301,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=8cfcf6359c8e85800c4e3eb3ae715e66f15ac325#8cfcf6359c8e85800c4e3eb3ae715e66f15ac325"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=8dd261e#8dd261e231d5c84e97c0ee39cfd58f14e708e002"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",
@@ -610,11 +610,14 @@ dependencies = [
 [[package]]
 name = "translator"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/translator?rev=2f1fd07b57921c9ba9d6e0bda342b5e8eb5c1e1a#2f1fd07b57921c9ba9d6e0bda342b5e8eb5c1e1a"
+source = "git+https://github.com/LiGoldragon/translator?rev=2676fd0cb0ced3316dc151f73a9f59856e15e62d#2676fd0cb0ced3316dc151f73a9f59856e15e62d"
 dependencies = [
  "datom-codec 0.32.3",
+ "libc",
+ "nix",
  "protos",
  "rkyv",
+ "rustix",
  "signal",
 ]
 

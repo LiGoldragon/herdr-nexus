@@ -1,8 +1,7 @@
 use crate::transport_types::{Caller, Kind, Lane};
-use shared_translator::{GroupId, ProcessId, UserId};
 use std::io::{Read, Write};
 
-pub const HEADER_BYTES: usize = 2;
+pub const HEADER_BYTES: usize = shared_translator::unix::HEADER_BYTES;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -49,26 +48,26 @@ impl From<std::io::Error> for TransportError {
     }
 }
 
+impl From<shared_translator::unix::Error> for TransportError {
+    fn from(error: shared_translator::unix::Error) -> Self {
+        match error {
+            shared_translator::unix::Error::Io(error) => Self::Io(error),
+            shared_translator::unix::Error::InvalidLimit => Self::InvalidLimit,
+            shared_translator::unix::Error::InvalidLength => Self::InvalidLength,
+            shared_translator::unix::Error::TooLarge => Self::TooLarge,
+            shared_translator::unix::Error::PeerCredential(message) => Self::PeerCredential(message),
+        }
+    }
+}
+
 pub fn read_frame(input: &mut impl Read, admission_limit: usize) -> Result<Frame, TransportError> {
-    validate_limit(admission_limit)?;
-    let mut prefix = [0_u8; 4];
-    input.read_exact(&mut prefix)?;
-    let total =
-        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::InvalidLength)?;
-    if total < HEADER_BYTES {
-        return Err(TransportError::InvalidLength);
-    }
-    if total > admission_limit {
-        return Err(TransportError::TooLarge);
-    }
-    let mut body = vec![0_u8; total];
-    input.read_exact(&mut body)?;
-    let lane = decode_lane(body[0])?;
-    let kind = decode_kind(body[1])?;
+    let raw = shared_translator::unix::read_frame(input, admission_limit)?;
+    let lane = decode_lane(raw.lane)?;
+    let kind = decode_kind(raw.kind)?;
     let frame = Frame {
         lane,
         kind,
-        payload: body.split_off(HEADER_BYTES),
+        payload: raw.payload,
     };
     if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
         frame.text()?;
@@ -79,37 +78,21 @@ pub fn read_frame(input: &mut impl Read, admission_limit: usize) -> Result<Frame
 /// Waits without an idle deadline for the first response byte, then bounds
 /// all remaining frame progress by one absolute deadline.
 pub fn read_frame_after_idle(
-    mut stream: std::os::unix::net::UnixStream,
+    stream: std::os::unix::net::UnixStream,
     progress_timeout: std::time::Duration,
     admission_limit: usize,
 ) -> Result<Option<Frame>, TransportError> {
-    validate_limit(admission_limit)?;
-    stream.set_read_timeout(None)?;
-    let mut prefix = [0_u8; 4];
-    match stream.read(&mut prefix[..1]) {
-        Ok(0) => return Ok(None),
-        Ok(1) => {}
-        Ok(_) => return Err(TransportError::InvalidLength),
-        Err(error) => return Err(TransportError::Io(error)),
-    }
-    let mut progressing = crate::deadline::DeadlineStream::new(stream, progress_timeout)?;
-    progressing.read_exact(&mut prefix[1..])?;
-    let total =
-        usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| TransportError::InvalidLength)?;
-    if total < HEADER_BYTES {
-        return Err(TransportError::InvalidLength);
-    }
-    if total > admission_limit {
-        return Err(TransportError::TooLarge);
-    }
-    let mut body = vec![0_u8; total];
-    progressing.read_exact(&mut body)?;
-    let lane = decode_lane(body[0])?;
-    let kind = decode_kind(body[1])?;
+    let Some(raw) = shared_translator::unix::read_frame_after_idle(
+        stream,
+        progress_timeout,
+        admission_limit,
+    )? else { return Ok(None) };
+    let lane = decode_lane(raw.lane)?;
+    let kind = decode_kind(raw.kind)?;
     let frame = Frame {
         lane,
         kind,
-        payload: body.split_off(HEADER_BYTES),
+        payload: raw.payload,
     };
     if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
         frame.text()?;
@@ -122,24 +105,18 @@ pub fn write_frame(
     frame: &Frame,
     admission_limit: usize,
 ) -> Result<(), TransportError> {
-    validate_limit(admission_limit)?;
     if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
         frame.text()?;
     }
-    let total = frame
-        .payload
-        .len()
-        .checked_add(HEADER_BYTES)
-        .ok_or(TransportError::TooLarge)?;
-    if total > admission_limit {
-        return Err(TransportError::TooLarge);
-    }
-    let total = u32::try_from(total).map_err(|_| TransportError::TooLarge)?;
-    output.write_all(&total.to_be_bytes())?;
-    output.write_all(&[encode_lane(&frame.lane), encode_kind(&frame.kind)])?;
-    output.write_all(&frame.payload)?;
-    output.flush()?;
-    Ok(())
+    shared_translator::unix::write_frame(
+        output,
+        &shared_translator::unix::Frame {
+            lane: encode_lane(&frame.lane),
+            kind: encode_kind(&frame.kind),
+            payload: frame.payload.clone(),
+        },
+        admission_limit,
+    ).map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -156,54 +133,27 @@ pub fn write_frame_witness(
     frame: &Frame,
     admission_limit: usize,
 ) -> Result<(), IncompleteSubmission> {
-    let mut bytes = Vec::new();
-    write_frame(&mut bytes, frame, admission_limit).map_err(|error| IncompleteSubmission {
-        written: 0,
-        error,
-    })?;
-    let mut written = 0;
-    while written < bytes.len() {
-        match output.write(&bytes[written..]) {
-            Ok(0) => {
-                return Err(IncompleteSubmission {
-                    written,
-                    error: TransportError::Io(std::io::Error::new(
-                        std::io::ErrorKind::WriteZero,
-                        "request frame write returned zero",
-                    )),
-                })
-            }
-            Ok(count) => written += count,
-            Err(error) => {
-                return Err(IncompleteSubmission {
-                    written,
-                    error: TransportError::Io(error),
-                })
-            }
-        }
+    if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
+        frame.text().map_err(|error| IncompleteSubmission { written: 0, error })?;
     }
-    output.flush().map_err(|error| IncompleteSubmission {
-        written,
-        error: TransportError::Io(error),
-    })
+    shared_translator::unix::write_frame_witness(
+        output,
+        &shared_translator::unix::Frame {
+            lane: encode_lane(&frame.lane),
+            kind: encode_kind(&frame.kind),
+            payload: frame.payload.clone(),
+        },
+        admission_limit,
+    ).map_err(|failure| IncompleteSubmission { written: failure.written, error: failure.error.into() })
 }
 
 pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<Caller, TransportError> {
-    let credentials = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)
-        .map_err(|error| TransportError::PeerCredential(error.to_string()))?;
+    let credentials = shared_translator::unix::peer_credentials(stream)?;
     Ok(Caller {
-        user_id: UserId(i64::from(credentials.uid())),
-        group_id: GroupId(i64::from(credentials.gid())),
-        process_id: ProcessId(i64::from(credentials.pid())),
+        user_id: credentials.user_id,
+        group_id: credentials.group_id,
+        process_id: credentials.process_id,
     })
-}
-
-fn validate_limit(limit: usize) -> Result<(), TransportError> {
-    if (HEADER_BYTES..=signal::MAXIMUM_SIGNAL_BYTES).contains(&limit) {
-        Ok(())
-    } else {
-        Err(TransportError::InvalidLimit)
-    }
 }
 
 fn decode_lane(value: u8) -> Result<Lane, TransportError> {

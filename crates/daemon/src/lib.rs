@@ -1460,31 +1460,22 @@ pub struct ConfigurationStore {
 }
 
 struct BoundPeer {
-    identity: shared_translator::PeerIdentity,
-    pidfd: std::os::fd::OwnedFd,
+    live: shared_translator::unix::LivePeer,
     generation: u64,
 }
 
 impl BoundPeer {
     fn capture(identity: shared_translator::PeerIdentity) -> std::io::Result<Self> {
-        let pid = i32::try_from(identity.process_id.0)
-            .ok()
-            .and_then(rustix::process::Pid::from_raw)
-            .ok_or_else(|| std::io::Error::other("peer process id is invalid"))?;
-        let pidfd = rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())?;
-        Ok(Self { identity, pidfd, generation: 0 })
+        shared_translator::unix::LivePeer::capture(identity)
+            .map(|live| Self { live, generation: 0 })
     }
 
     fn matches(&self, caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
-        use std::os::fd::AsFd;
-        if self.identity.user_id != caller.user_id || self.identity.process_id != caller.process_id {
-            return false;
-        }
-        let mut poll = [nix::poll::PollFd::new(
-            self.pidfd.as_fd(),
-            nix::poll::PollFlags::POLLIN,
-        )];
-        matches!(nix::poll::poll(&mut poll, 0_u8), Ok(0))
+        self.live.matches(&shared_translator::unix::PeerCredentials {
+            user_id: caller.user_id.clone(),
+            group_id: caller.group_id.clone(),
+            process_id: caller.process_id.clone(),
+        })
     }
 }
 
@@ -1495,8 +1486,8 @@ impl ConfigurationStore {
     ) -> Option<(shared_translator::PeerId, u64)> {
         let peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
         peers.iter().find_map(|(peer_id, peer)| {
-            if peer.identity.user_id != caller.user_id
-                || peer.identity.process_id != caller.process_id
+            if peer.live.identity.user_id != caller.user_id
+                || peer.live.identity.process_id != caller.process_id
             {
                 return None;
             }
@@ -1626,15 +1617,8 @@ impl ConfigurationStore {
         let applied = setting.clone();
         match setting {
             core_meta_herdr_nexus::CoreSet::Peer(binding) => {
-                let raw = i32::try_from(binding.peer_identity.process_id.0).ok();
-                let Some(pid) = raw.and_then(rustix::process::Pid::from_raw) else {
-                    return Response::ConfigureRefused(invalid_peer("peer process id is invalid"));
-                };
-                let pidfd = match rustix::process::pidfd_open(
-                    pid,
-                    rustix::process::PidfdFlags::empty(),
-                ) {
-                    Ok(pidfd) => pidfd,
+                let live = match shared_translator::unix::LivePeer::capture(binding.peer_identity) {
+                    Ok(live) => live,
                     Err(error) => {
                         return Response::ConfigureRefused(invalid_peer(&format!(
                             "peer process is unavailable: {error}"
@@ -1647,8 +1631,7 @@ impl ConfigurationStore {
                 let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
                 let replaced = peers
                     .insert(binding.peer_id, BoundPeer {
-                        identity: binding.peer_identity,
-                        pidfd,
+                        live,
                         generation,
                     });
                 if replaced.is_some() {
