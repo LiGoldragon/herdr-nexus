@@ -492,7 +492,7 @@ dependencies = [
 [[package]]
 name = "signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=771960c643cc63b5280919cdaad059944a7a048d#771960c643cc63b5280919cdaad059944a7a048d"
+source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=04aaeef71ce005f78d4f1d58e4697d04d8c02dc1#04aaeef71ce005f78d4f1d58e4697d04d8c02dc1"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",

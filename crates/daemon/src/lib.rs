@@ -195,15 +195,38 @@ where
     Ok(())
 }
 
-fn same_login(caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
+pub fn same_login(caller: &herdr_nexus_wire::transport_types::Caller) -> bool {
     caller.user_id.0 == i64::from(nix::unistd::getuid().as_raw())
 }
 
 pub struct Dispatcher {
-    core: std::sync::Mutex<herdr_nexus_core::Core<herdr_nexus_core::InMemory>>,
-    translator_socket: std::path::PathBuf,
+    state: std::sync::Mutex<DispatcherState>,
+    emitter: Arc<dyn ExternalEmitter>,
     subscriptions: std::sync::Mutex<SubscriptionHub>,
     next_subscription_generation: std::sync::atomic::AtomicU64,
+}
+
+pub trait ExternalEmitter: Send + Sync {
+    fn emit(
+        &self,
+        configuration: &RuntimeConfiguration,
+        herdr: emission_herdr_nexus::Herdr,
+    ) -> EmissionResult;
+}
+
+pub enum EmissionResult {
+    External(emission_herdr_nexus::ExternalOutcome),
+    Unavailable(signal_herdr_nexus::TransportRefusal),
+}
+
+struct SocketEmitter {
+    translator_socket: std::path::PathBuf,
+}
+
+struct DispatcherState {
+    core: herdr_nexus_core::Core<herdr_nexus_core::InMemory>,
+    reserved: std::collections::HashMap<signal_herdr_nexus::Pane, u64>,
+    next_reservation: u64,
 }
 
 #[derive(Default)]
@@ -222,13 +245,22 @@ struct SessionSubscription {
 impl Dispatcher {
     pub fn new(paths: &SocketPaths) -> Self {
         Self {
-            core: std::sync::Mutex::new(herdr_nexus_core::Core::new(
-                herdr_nexus_core::InMemory::default(),
-            )),
-            translator_socket: paths.translator.clone(),
+            state: std::sync::Mutex::new(DispatcherState {
+                core: herdr_nexus_core::Core::new(herdr_nexus_core::InMemory::default()),
+                reserved: std::collections::HashMap::new(),
+                next_reservation: 1,
+            }),
+            emitter: Arc::new(SocketEmitter { translator_socket: paths.translator.clone() }),
             subscriptions: std::sync::Mutex::new(SubscriptionHub::default()),
             next_subscription_generation: std::sync::atomic::AtomicU64::new(1),
         }
+    }
+
+    #[cfg(test)]
+    fn with_emitter(paths: &SocketPaths, emitter: Arc<dyn ExternalEmitter>) -> Self {
+        let mut dispatcher = Self::new(paths);
+        dispatcher.emitter = emitter;
+        dispatcher
     }
 
     pub fn dispatch(
@@ -240,10 +272,6 @@ impl Dispatcher {
             AgentPrompt_Data, AgentStart_Data, Herdr, Keys_Data, Verb, WorkspaceCreate_Data,
         };
         use signal_herdr_nexus::{Query, Response};
-        let mut core = self
-            .core
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         match query {
             Query::Create(workspace) => {
                 let external = self.execute(
@@ -256,9 +284,11 @@ impl Dispatcher {
                         }),
                     },
                 );
-                Response::Created(core.create(workspace, created_result(external)))
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                Response::Created(state.core.create(workspace, created_result(external)))
             }
             Query::Start(start) => {
+                let reservation = match self.reserve(&start.pane) { Ok(token) => token, Err(outcome) => return Response::Started(outcome) };
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -273,9 +303,11 @@ impl Dispatcher {
                         }),
                     },
                 );
-                Response::Started(core.start(start.pane, start.label, done_result(external)))
+                let mut state = self.finish_reservation(&start.pane, reservation);
+                Response::Started(state.core.start(start.pane, start.label, started_result(external)))
             }
             Query::Prompt(prompt) => {
+                let reservation = match self.reserve(&prompt.pane) { Ok(token) => token, Err(outcome) => return Response::Prompted(outcome) };
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -286,9 +318,11 @@ impl Dispatcher {
                         }),
                     },
                 );
-                Response::Prompted(core.prompt(prompt.pane, done_result(external)))
+                let mut state = self.finish_reservation(&prompt.pane, reservation);
+                Response::Prompted(state.core.prompt(prompt.pane, done_result(external)))
             }
             Query::Press(press) => {
+                let reservation = match self.reserve(&press.pane) { Ok(token) => token, Err(outcome) => return Response::Pressed(outcome) };
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -299,9 +333,11 @@ impl Dispatcher {
                         }),
                     },
                 );
-                Response::Pressed(core.press(press.pane, done_result(external)))
+                let mut state = self.finish_reservation(&press.pane, reservation);
+                Response::Pressed(state.core.press(press.pane, done_result(external)))
             }
             Query::Close(pane) => {
+                let reservation = match self.reserve(&pane) { Ok(token) => token, Err(outcome) => return Response::Closed(outcome) };
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -309,9 +345,18 @@ impl Dispatcher {
                         verb: Verb::PaneClose(pane.pane_id.clone()),
                     },
                 );
-                Response::Closed(core.close(pane, done_result(external)))
+                let mut state = self.finish_reservation(&pane, reservation);
+                Response::Closed(state.core.close(pane, done_result(external)))
             }
             Query::List(session) => {
+                {
+                    let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                    match state.core.preflight_session(&session) {
+                        Ok(false) => return Response::Listed(signal_herdr_nexus::Outcome::Listed(Vec::new())),
+                        Ok(true) => {}
+                        Err(outcome) => return Response::Listed(outcome),
+                    }
+                }
                 let external = self.execute(
                     &configuration,
                     Herdr {
@@ -319,12 +364,35 @@ impl Dispatcher {
                         verb: Verb::PaneList,
                     },
                 );
-                Response::Listed(core.list(session, listed_result(external)))
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                Response::Listed(state.core.list(session, listed_result(external)))
             }
-            Query::Subscribe(session) => Response::Subscribed(
-                core.subscribe(session, herdr_nexus_core::ExternalResult::Uncertain),
-            ),
+            Query::Subscribe(session) => {
+                let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+                Response::Subscribed(state.core.subscribe(session, herdr_nexus_core::ExternalResult::Uncertain))
+            }
         }
+    }
+
+    fn reserve(&self, pane: &signal_herdr_nexus::Pane) -> Result<u64, signal_herdr_nexus::Outcome> {
+        use signal_herdr_nexus::{AttemptInProgress, Outcome};
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        state.core.preflight_owned(pane)?;
+        if state.reserved.contains_key(pane) {
+            return Err(Outcome::AttemptInProgress(AttemptInProgress(pane.clone())));
+        }
+        let token = state.next_reservation;
+        state.next_reservation = state.next_reservation.wrapping_add(1).max(1);
+        state.reserved.insert(pane.clone(), token);
+        Ok(token)
+    }
+
+    fn finish_reservation(&self, pane: &signal_herdr_nexus::Pane, token: u64) -> std::sync::MutexGuard<'_, DispatcherState> {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        let owns = state.reserved.get(pane).copied() == Some(token);
+        assert!(owns, "only the reservation token owner may finalize it");
+        state.reserved.remove(pane);
+        state
     }
 
     /// Registers a nondurable stream in the session's shared poll source. The
@@ -340,8 +408,8 @@ impl Dispatcher {
         use signal_herdr_nexus::Response;
         let capacity = signal::FrameCapacity::from(configuration.frame_capacity_bytes);
         let acknowledgement = {
-            let mut core = self.core.lock().unwrap_or_else(|p| p.into_inner());
-            Response::Subscribed(core.subscribe(
+            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            Response::Subscribed(state.core.subscribe(
                 session.clone(),
                 herdr_nexus_core::ExternalResult::Succeeded(()),
             ))
@@ -351,6 +419,9 @@ impl Dispatcher {
             .subscriptions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let acknowledgement = herdr_nexus_wire::public_call::Response::Answered(
+            herdr_nexus_wire::public_payload::Output(acknowledgement),
+        );
         output.write_frame(&acknowledgement.signalize()?, capacity)?;
         if let Some(existing) = hub.sessions.get_mut(&session) {
             existing.subscribers.push(stream);
@@ -472,19 +543,42 @@ impl Dispatcher {
         &self,
         configuration: &RuntimeConfiguration,
         herdr: emission_herdr_nexus::Herdr,
-    ) -> emission_herdr_nexus::ExternalOutcome {
+    ) -> EmissionResult {
+        self.emitter.emit(configuration, herdr)
+    }
+}
+
+impl ExternalEmitter for SocketEmitter {
+    fn emit(
+        &self,
+        configuration: &RuntimeConfiguration,
+        herdr: emission_herdr_nexus::Herdr,
+    ) -> EmissionResult {
         use signal::{ByteViewable, Restorable, Signal, Signalizable};
         use herdr_nexus_wire::transport_types::{Kind, Lane};
-        let result = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let stream = std::os::unix::net::UnixStream::connect(&self.translator_socket)?;
-            let mut stream = DeadlineStream::new(stream, configuration.transport_timeout)?;
-            let request = emission_herdr_nexus::Query::Emit(herdr);
-            let request = request.signalize()?;
-            herdr_nexus_wire::frame::write_frame(&mut stream, &herdr_nexus_wire::frame::Frame {
+        let stream = match std::os::unix::net::UnixStream::connect(&self.translator_socket) {
+            Ok(stream) => stream,
+            Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
+        };
+        let mut stream = match DeadlineStream::new(stream, configuration.transport_timeout) {
+            Ok(stream) => stream,
+            Err(error) => return unavailable_transport(&self.translator_socket, error.to_string()),
+        };
+        let request = emission_herdr_nexus::Query::Emit(herdr);
+        let request = match request.signalize() {
+            Ok(request) => request,
+            Err(error) => return unavailable_transport(&self.translator_socket, format!("{error:?}")),
+        };
+        // Once writing begins, an error cannot prove that the complete request
+        // stayed local. Every later failure is therefore Uncertain.
+        if herdr_nexus_wire::frame::write_frame(&mut stream, &herdr_nexus_wire::frame::Frame {
                 lane: Lane::EmissionSignal,
                 kind: Kind::Request,
                 payload: request.bytes().to_vec(),
-            }, configuration.frame_capacity_bytes)?;
+            }, configuration.frame_capacity_bytes).is_err() {
+            return EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Uncertain);
+        }
+        let result = (|| -> Result<_, Box<dyn std::error::Error>> {
             let body = herdr_nexus_wire::frame::read_frame(&mut stream, configuration.frame_capacity_bytes)?;
             if body.lane != Lane::EmissionSignal || body.kind != Kind::Answered {
                 return Err("translator returned a non-answer emission frame".into());
@@ -495,8 +589,20 @@ impl Dispatcher {
                 emission_herdr_nexus::Response::Emitted(outcome) => Ok(outcome),
             }
         })();
-        result.unwrap_or(emission_herdr_nexus::ExternalOutcome::Uncertain)
+        EmissionResult::External(
+            result.unwrap_or(emission_herdr_nexus::ExternalOutcome::Uncertain),
+        )
     }
+}
+
+fn unavailable_transport(
+    path: &std::path::Path,
+    message: String,
+) -> EmissionResult {
+    EmissionResult::Unavailable(signal_herdr_nexus::TransportRefusal {
+        socket_path: signal_herdr_nexus::SocketPath(path.display().to_string()),
+        message: signal_herdr_nexus::Message(message),
+    })
 }
 
 fn subscriber_connected(stream: &std::os::unix::net::UnixStream) -> bool {
@@ -526,6 +632,9 @@ fn write_subscription_change(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use signal::{FrameWriting, Signalizable};
     let mut output = DeadlineStream::new(stream.try_clone()?, configuration.transport_timeout)?;
+    let change = herdr_nexus_wire::public_call::Response::Answered(
+        herdr_nexus_wire::public_payload::Output(change.clone()),
+    );
     output.write_frame(
         &change.signalize()?,
         signal::FrameCapacity::from(configuration.frame_capacity_bytes),
@@ -534,43 +643,61 @@ fn write_subscription_change(
 }
 
 fn done_result(
-    outcome: emission_herdr_nexus::ExternalOutcome,
+    outcome: EmissionResult,
 ) -> herdr_nexus_core::ExternalResult<()> {
     match outcome {
-        emission_herdr_nexus::ExternalOutcome::Done => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Done) => {
             herdr_nexus_core::ExternalResult::Succeeded(())
         }
-        emission_herdr_nexus::ExternalOutcome::Refused(refusal) => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
             herdr_nexus_core::ExternalResult::Refused(refusal)
         }
+        EmissionResult::Unavailable(refusal) => herdr_nexus_core::ExternalResult::Unavailable(refusal),
+        _ => herdr_nexus_core::ExternalResult::Uncertain,
+    }
+}
+
+fn started_result(
+    outcome: EmissionResult,
+) -> herdr_nexus_core::ExternalResult<signal_herdr_nexus::State> {
+    match outcome {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Started(state)) => {
+            herdr_nexus_core::ExternalResult::Succeeded(state)
+        }
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
+            herdr_nexus_core::ExternalResult::Refused(refusal)
+        }
+        EmissionResult::Unavailable(refusal) => herdr_nexus_core::ExternalResult::Unavailable(refusal),
         _ => herdr_nexus_core::ExternalResult::Uncertain,
     }
 }
 
 fn created_result(
-    outcome: emission_herdr_nexus::ExternalOutcome,
+    outcome: EmissionResult,
 ) -> herdr_nexus_core::ExternalResult<signal_herdr_nexus::Pane> {
     match outcome {
-        emission_herdr_nexus::ExternalOutcome::Created(pane) => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Created(pane)) => {
             herdr_nexus_core::ExternalResult::Succeeded(pane)
         }
-        emission_herdr_nexus::ExternalOutcome::Refused(refusal) => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
             herdr_nexus_core::ExternalResult::Refused(refusal)
         }
+        EmissionResult::Unavailable(refusal) => herdr_nexus_core::ExternalResult::Unavailable(refusal),
         _ => herdr_nexus_core::ExternalResult::Uncertain,
     }
 }
 
 fn listed_result(
-    outcome: emission_herdr_nexus::ExternalOutcome,
+    outcome: EmissionResult,
 ) -> herdr_nexus_core::ExternalResult<Vec<emission_herdr_nexus::PaneObservation>> {
     match outcome {
-        emission_herdr_nexus::ExternalOutcome::Listed(observed) => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Listed(observed)) => {
             herdr_nexus_core::ExternalResult::Succeeded(observed)
         }
-        emission_herdr_nexus::ExternalOutcome::Refused(refusal) => {
+        EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Refused(refusal)) => {
             herdr_nexus_core::ExternalResult::Refused(refusal)
         }
+        EmissionResult::Unavailable(refusal) => herdr_nexus_core::ExternalResult::Unavailable(refusal),
         _ => herdr_nexus_core::ExternalResult::Uncertain,
     }
 }
@@ -668,6 +795,94 @@ fn checked_duration(milliseconds: i64) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct CountingEmitter(std::sync::atomic::AtomicUsize);
+
+    impl ExternalEmitter for CountingEmitter {
+        fn emit(
+            &self,
+            _configuration: &RuntimeConfiguration,
+            _herdr: emission_herdr_nexus::Herdr,
+        ) -> EmissionResult {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            EmissionResult::External(emission_herdr_nexus::ExternalOutcome::Uncertain)
+        }
+    }
+
+    fn test_paths() -> SocketPaths {
+        SocketPaths {
+            public: "/tmp/herdr-test-public".into(),
+            meta: "/tmp/herdr-test-meta".into(),
+            translator: "/tmp/herdr-test-translator".into(),
+        }
+    }
+
+    fn test_configuration() -> Arc<RuntimeConfiguration> {
+        Arc::new(RuntimeConfiguration {
+            polling: Duration::from_millis(10),
+            start_timeout: Duration::from_millis(20),
+            frame_capacity_bytes: 4096,
+            transport_timeout: Duration::from_millis(30),
+        })
+    }
+
+    fn test_pane() -> signal_herdr_nexus::Pane {
+        signal_herdr_nexus::Pane {
+            session: signal_herdr_nexus::Session("missing".into()),
+            pane_id: signal_herdr_nexus::PaneId("pane".into()),
+        }
+    }
+
+    #[test]
+    fn four_unowned_mutations_stop_before_the_emitter() {
+        use signal_herdr_nexus::{
+            AgentKind, AgentName, Command, Executable, Keys, Label, Press_Data, Program,
+            Prompt_Data, Query, Start_Data, Text,
+        };
+        let emitter = Arc::new(CountingEmitter(std::sync::atomic::AtomicUsize::new(0)));
+        let dispatcher = Dispatcher::with_emitter(&test_paths(), emitter.clone());
+        let pane = test_pane();
+        let configuration = test_configuration();
+        let command = Command {
+            agent_name: AgentName("probe".into()),
+            agent_kind: AgentKind::Codex,
+            executable: Executable::Explicit(Program("/bin/true".into())),
+            string_vector: Vec::new(),
+        };
+        let queries = [
+            Query::Start(Start_Data { pane: pane.clone(), command, label: Label("label".into()) }),
+            Query::Prompt(Prompt_Data { pane: pane.clone(), text: Text("hello".into()) }),
+            Query::Press(Press_Data { pane: pane.clone(), keys: Keys(vec!["x".into()]) }),
+            Query::Close(pane),
+        ];
+        for query in queries {
+            let response = dispatcher.dispatch(query, Arc::clone(&configuration));
+            let outcome = match response {
+                signal_herdr_nexus::Response::Started(outcome)
+                | signal_herdr_nexus::Response::Prompted(outcome)
+                | signal_herdr_nexus::Response::Pressed(outcome)
+                | signal_herdr_nexus::Response::Closed(outcome) => outcome,
+                _ => panic!("mutation response"),
+            };
+            assert!(matches!(outcome, signal_herdr_nexus::Outcome::Unknown(_)));
+        }
+        assert_eq!(emitter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn empty_owned_list_is_complete_without_external_observation() {
+        let emitter = Arc::new(CountingEmitter(std::sync::atomic::AtomicUsize::new(0)));
+        let dispatcher = Dispatcher::with_emitter(&test_paths(), emitter.clone());
+        let response = dispatcher.dispatch(
+            signal_herdr_nexus::Query::List(signal_herdr_nexus::Session("empty".into())),
+            test_configuration(),
+        );
+        assert!(matches!(
+            response,
+            signal_herdr_nexus::Response::Listed(signal_herdr_nexus::Outcome::Listed(ref panes)) if panes.is_empty()
+        ));
+        assert_eq!(emitter.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn transport_timeout_must_exceed_start_timeout() {

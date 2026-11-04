@@ -27,6 +27,7 @@ pub enum Attempt {
 pub enum ExternalResult<T> {
     Succeeded(T),
     Refused(Refusal),
+    Unavailable(signal_herdr_nexus::TransportRefusal),
     Uncertain,
 }
 
@@ -51,6 +52,7 @@ pub struct ListingRefusal {
 
 pub trait Memory {
     fn owned(&self, pane: &Pane) -> Result<Option<OwnedPane>, MemoryRefusal>;
+    fn owned_in_session(&self, session: &Session) -> Result<Vec<OwnedPane>, MemoryRefusal>;
     fn store_owned(&mut self, pane: OwnedPane) -> Result<(), MemoryRefusal>;
     fn close_owned(&mut self, pane: &Pane) -> Result<(), MemoryRefusal>;
     fn store_uncertain(&mut self, reconciliation: Reconciliation) -> Result<(), MemoryRefusal>;
@@ -96,6 +98,15 @@ impl Memory for InMemory {
         Ok(self.panes.get(pane).cloned())
     }
 
+    fn owned_in_session(&self, session: &Session) -> Result<Vec<OwnedPane>, MemoryRefusal> {
+        Ok(self
+            .panes
+            .values()
+            .filter(|owned| &owned.pane.session == session)
+            .cloned()
+            .collect())
+    }
+
     fn store_owned(&mut self, pane: OwnedPane) -> Result<(), MemoryRefusal> {
         self.panes.insert(pane.pane.clone(), pane);
         Ok(())
@@ -107,7 +118,15 @@ impl Memory for InMemory {
     }
 
     fn store_uncertain(&mut self, reconciliation: Reconciliation) -> Result<(), MemoryRefusal> {
-        self.uncertain.push(reconciliation);
+        if let Some(existing) = self
+            .uncertain
+            .iter_mut()
+            .find(|existing| same_uncertainty_locus(&existing.attempt, &reconciliation.attempt))
+        {
+            *existing = reconciliation;
+        } else {
+            self.uncertain.push(reconciliation);
+        }
         Ok(())
     }
 
@@ -129,6 +148,24 @@ impl Memory for InMemory {
                 .map_or(State::Dead, |seen| seen.state.clone());
         }
         Ok(known)
+    }
+}
+
+fn same_uncertainty_locus(left: &Attempt, right: &Attempt) -> bool {
+    use Attempt::*;
+    fn pane(attempt: &Attempt) -> Option<&Pane> {
+        match attempt {
+            Attempt::Start(pane) | Attempt::Prompt(pane) | Attempt::Press(pane) | Attempt::Close(pane) => Some(pane),
+            _ => None,
+        }
+    }
+    if let (Some(left), Some(right)) = (pane(left), pane(right)) {
+        return left == right;
+    }
+    match (left, right) {
+        (List(a), List(b)) | (Subscribe(a), Subscribe(b)) => a == b,
+        (Create, Create) => true,
+        _ => false,
     }
 }
 
@@ -164,19 +201,20 @@ impl<M: Memory> Core<M> {
                 }
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
             ExternalResult::Uncertain => self.retain_uncertain(Attempt::Create),
         }
     }
 
-    pub fn start(&mut self, pane: Pane, label: Label, external: ExternalResult<()>) -> Outcome {
+    pub fn start(&mut self, pane: Pane, label: Label, external: ExternalResult<State>) -> Outcome {
         let mut owned = match self.require_owned(&pane) {
             Ok(owned) => owned,
             Err(outcome) => return outcome,
         };
         match external {
-            ExternalResult::Succeeded(()) => {
+            ExternalResult::Succeeded(state) => {
                 owned.label = Some(label);
-                owned.state = State::Idle;
+                owned.state = state;
                 match self.memory.store_owned(owned) {
                     Ok(()) => Outcome::Done,
                     Err(refusal) => {
@@ -185,6 +223,7 @@ impl<M: Memory> Core<M> {
                 }
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
             ExternalResult::Uncertain => self.retain_uncertain(Attempt::Start(pane)),
         }
     }
@@ -213,6 +252,7 @@ impl<M: Memory> Core<M> {
                 Err(refusal) => store_refused(refusal, StorePhase::Observed(ObservedEffect::Done)),
             },
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
             ExternalResult::Uncertain => self.retain_uncertain(Attempt::Close(pane)),
         }
     }
@@ -233,6 +273,7 @@ impl<M: Memory> Core<M> {
                 }
             }
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
             ExternalResult::Uncertain => self.retain_uncertain(Attempt::List(session)),
         }
     }
@@ -249,10 +290,26 @@ impl<M: Memory> Core<M> {
         }
     }
 
+    /// Checks ownership before an external effect. Callers keep their own
+    /// reservation beside this Core while the effect is in flight.
+    pub fn preflight_owned(&self, pane: &Pane) -> Result<(), Outcome> {
+        self.require_owned(pane).map(|_| ())
+    }
+
+    /// Returns whether a session has any owned panes. An empty owned set is a
+    /// complete local List result and owes no external observation.
+    pub fn preflight_session(&self, session: &Session) -> Result<bool, Outcome> {
+        match self.memory.owned_in_session(session) {
+            Ok(owned) => Ok(!owned.is_empty()),
+            Err(refusal) => Err(store_refused(refusal, StorePhase::BeforeEmission)),
+        }
+    }
+
     fn finish_done(&mut self, attempt: Attempt, external: ExternalResult<()>) -> Outcome {
         match external {
             ExternalResult::Succeeded(()) => Outcome::Done,
             ExternalResult::Refused(refusal) => Outcome::Refused(refusal),
+            ExternalResult::Unavailable(refusal) => Outcome::Unavailable(refusal),
             ExternalResult::Uncertain => self.retain_uncertain(attempt),
         }
     }
@@ -317,6 +374,15 @@ mod tests {
                 Err(MemoryRefusal(Message("selected test refusal".into())))
             } else {
                 self.memory.owned(pane)
+            }
+        }
+
+        fn owned_in_session(&self, session: &Session) -> Result<Vec<OwnedPane>, MemoryRefusal> {
+            if self.next.get() == Some(Call::Owned) {
+                self.next.set(None);
+                Err(MemoryRefusal(Message("selected test refusal".into())))
+            } else {
+                self.memory.owned_in_session(session)
             }
         }
 
@@ -428,6 +494,15 @@ mod tests {
                 attempt: Attempt::Prompt(pane())
             }]
         );
+    }
+
+    #[test]
+    fn repeated_uncertainty_replaces_the_one_record_for_its_pane() {
+        let mut core = Core::new(seeded());
+        assert_eq!(core.prompt(pane(), ExternalResult::Uncertain), Outcome::Uncertain);
+        assert_eq!(core.press(pane(), ExternalResult::Uncertain), Outcome::Uncertain);
+        assert_eq!(core.memory().uncertain().len(), 1);
+        assert_eq!(core.memory().uncertain()[0].attempt, Attempt::Press(pane()));
     }
 
     #[test]

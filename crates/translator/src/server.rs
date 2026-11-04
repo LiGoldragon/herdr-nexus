@@ -45,6 +45,10 @@ pub fn serve_one(
         return Err(ServerError::Transport(crate::transport::TransportError::InvalidLength));
     }
     let lane = request.lane.clone();
+    let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
+    if caller.user_id.0 != i64::from(nix::unistd::getuid().as_raw()) {
+        return write_failed_frame(stream, lane, "caller is outside the bound login");
+    }
     let response = (|| -> Result<Frame, ServerError> { Ok(match request.lane {
         Lane::EmissionSignal => {
             let query = Signal::<emission_herdr_nexus::Query>::from(request.payload)
@@ -60,16 +64,14 @@ pub fn serve_one(
             Frame { lane: Lane::EmissionSignal, kind: Kind::Answered, payload: response.bytes().to_vec() }
         }
         Lane::MetaText => {
-            let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
             let text = request.text().map_err(ServerError::Transport)?;
-            let response = configure_text(configuration, place, caller, text)?;
+            let response = configure_text(configuration, place, caller.clone(), text)?;
             Frame { lane: Lane::MetaText, kind: Kind::Answered, payload: response.into_bytes() }
         }
         Lane::PublicText => {
             let Some((mut budget, timeout)) = configuration.text_context() else {
                 return Err(ServerError::Signal("translator is awaiting settings".into()));
             };
-            let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
             let text = request.text().map_err(ServerError::Transport)?;
             let query = decode_public(text, &mut budget)?;
             let response = forward_public(place, caller, query, timeout)?;
@@ -86,6 +88,23 @@ pub fn serve_one(
     };
     transport::write_frame(stream, &response, MAXIMUM_SIGNAL_BYTES)
         .map_err(ServerError::Transport)
+}
+
+fn write_failed_frame(
+    stream: &mut UnixStream,
+    lane: crate::transport_types::Lane,
+    message: &str,
+) -> Result<(), ServerError> {
+    crate::transport::write_frame(
+        stream,
+        &crate::transport::Frame {
+            lane,
+            kind: crate::transport_types::Kind::Failed,
+            payload: message.as_bytes().to_vec(),
+        },
+        MAXIMUM_SIGNAL_BYTES,
+    )
+    .map_err(ServerError::Transport)
 }
 
 #[derive(Default)]
