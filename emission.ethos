@@ -1,0 +1,11 @@
+; Temporary stand-in: Emission is represented as a Signal root until ethos-zero supports Emission.
+Signal
+[ herdr:[ Session PaneId Workspace Command Text Keys Outcome ] ]
+[ Herdr.{ Session Verb } ]
+[ Outcome ]
+[ Verb.[ WorkspaceCreate.Workspace
+         AgentStart.{ PaneId Command }
+         AgentPrompt.{ PaneId Text }
+         Keys.{ PaneId Keys }
+         Kill.PaneId ] ]
+[]
