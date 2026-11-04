@@ -384,8 +384,9 @@ struct StartResult {
     agent: AgentJson,
     #[allow(dead_code)]
     argv: Vec<String>,
+    #[serde(default)]
     #[allow(dead_code)]
-    executable: String,
+    executable: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -689,6 +690,25 @@ mod tests {
             decode_complete_snapshot(panes.as_bytes(), agents, &Session("main".into())),
             ExternalOutcome::Uncertain
         ));
+    }
+
+    #[test]
+    fn start_accepts_the_minimal_and_convenience_envelopes() {
+        let agent = r#"{"terminal_id":"t","name":"probe","agent":"codex","agent_status":"idle","workspace_id":"w","tab_id":"tab","pane_id":"w:p","focused":true,"interactive_ready":true,"revision":2}"#;
+        let minimal = format!(
+            r#"{{"id":"cli:agent:start","result":{{"type":"agent_started","agent":{agent},"argv":["codex"]}}}}"#
+        );
+        let convenience = format!(
+            r#"{{"id":"cli:agent:start","result":{{"type":"agent_started","agent":{agent},"argv":["codex"],"executable":"codex"}}}}"#
+        );
+        assert_eq!(
+            decode_start(minimal.as_bytes(), "w:p", "probe", "codex"),
+            ExternalOutcome::Done
+        );
+        assert_eq!(
+            decode_start(convenience.as_bytes(), "w:p", "probe", "codex"),
+            ExternalOutcome::Done
+        );
     }
 
     #[test]
