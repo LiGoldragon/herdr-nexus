@@ -22,24 +22,40 @@ pub enum Endpoint {
     Meta,
 }
 
-pub fn run(bootstrap: &herdr_nexus_wire::transport_types::TranslatorBootstrap) -> Result<(), ServerError> {
+pub fn run(
+    bootstrap: &herdr_nexus_wire::transport_types::TranslatorBootstrap,
+) -> Result<(), ServerError> {
     let place = &bootstrap.place;
     let admission = herdr_nexus_wire::ValidAdmission::try_from(&bootstrap.admission)
         .map_err(|message| ServerError::Signal(message.into()))?;
     let bootstrap_budget = validated_budget(&bootstrap.budget_value)
         .ok_or_else(|| ServerError::Signal("invalid bootstrap text budget".into()))?;
     let names = herdr_nexus_wire::socket_names();
-    let public = OwnedSocket::bind(
-        Path::new(&place.directory.0).join(names.public_translator_socket.0),
-    )?;
-    let meta = OwnedSocket::bind(
-        Path::new(&place.directory.0).join(names.meta_translator_socket.0),
-    )?;
+    let public =
+        OwnedSocket::bind(Path::new(&place.directory.0).join(names.public_translator_socket.0))?;
+    let meta =
+        OwnedSocket::bind(Path::new(&place.directory.0).join(names.meta_translator_socket.0))?;
     let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
     let meta_configuration = std::sync::Arc::clone(&configuration);
     let meta_place = place.clone();
-    std::thread::spawn(move || serve_listener(meta, meta_configuration, meta_place, Endpoint::Meta, admission, bootstrap_budget));
-    serve_listener(public, configuration, place.clone(), Endpoint::Public, admission, bootstrap_budget);
+    std::thread::spawn(move || {
+        serve_listener(
+            meta,
+            meta_configuration,
+            meta_place,
+            Endpoint::Meta,
+            admission,
+            bootstrap_budget,
+        )
+    });
+    serve_listener(
+        public,
+        configuration,
+        place.clone(),
+        Endpoint::Public,
+        admission,
+        bootstrap_budget,
+    );
     Ok(())
 }
 
@@ -56,7 +72,14 @@ fn serve_listener(
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         std::thread::spawn(move || {
-            let _ = serve_one(&mut stream, &configuration, &place, endpoint, admission, bootstrap_budget);
+            let _ = serve_one(
+                &mut stream,
+                &configuration,
+                &place,
+                endpoint,
+                admission,
+                bootstrap_budget,
+            );
         });
     }
 }
@@ -72,12 +95,17 @@ pub fn serve_one(
     use crate::transport::{self, Frame};
     use crate::transport_types::{Kind, Lane};
     let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
-    let mut io = herdr_nexus_wire::deadline::DeadlineStream::new(stream.try_clone().map_err(ServerError::Io)?, admission.deadline)
-        .map_err(ServerError::Io)?;
-    let request = transport::read_frame(&mut io, admission.frame_capacity)
-        .map_err(ServerError::Transport)?;
+    let mut io = herdr_nexus_wire::deadline::DeadlineStream::new(
+        stream.try_clone().map_err(ServerError::Io)?,
+        admission.deadline,
+    )
+    .map_err(ServerError::Io)?;
+    let request =
+        transport::read_frame(&mut io, admission.frame_capacity).map_err(ServerError::Transport)?;
     if request.kind != Kind::Request {
-        return Err(ServerError::Transport(crate::transport::TransportError::InvalidLength));
+        return Err(ServerError::Transport(
+            crate::transport::TransportError::InvalidLength,
+        ));
     }
     let lane = request.lane.clone();
     let allowed = match endpoint {
@@ -85,47 +113,94 @@ pub fn serve_one(
         Endpoint::Meta => lane == Lane::MetaText,
     };
     if !allowed {
-        return write_failed_frame(&mut io, lane, "lane is unavailable on this endpoint", admission.frame_capacity);
+        return write_failed_frame(
+            &mut io,
+            lane,
+            "lane is unavailable on this endpoint",
+            admission.frame_capacity,
+        );
     }
     if caller.user_id.0 != i64::from(nix::unistd::getuid().as_raw()) {
-        return write_failed_frame(&mut io, lane, "caller is outside the bound login", admission.frame_capacity);
+        return write_failed_frame(
+            &mut io,
+            lane,
+            "caller is outside the bound login",
+            admission.frame_capacity,
+        );
     }
-    let response = (|| -> Result<Frame, ServerError> { Ok(match request.lane {
-        Lane::EmissionSignal => {
-            let query = Signal::<emission_herdr_nexus::Query>::from(request.payload)
-                .restore()
-                .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-            let Some(runtime) = configuration.runtime() else {
-                return Err(ServerError::Signal("translator is awaiting settings".into()));
-            };
-            let emission_herdr_nexus::Query::Emit(herdr) = query;
-            let response = emission_herdr_nexus::Response::Emitted(execute(&runtime, &herdr))
-                .signalize()
-                .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-            Frame { lane: Lane::EmissionSignal, kind: Kind::Answered, payload: response.bytes().to_vec() }
-        }
-        Lane::MetaText => {
-            let text = request.text().map_err(ServerError::Transport)?;
-            let response = configure_text(
+    if request.lane == Lane::PublicText {
+        let Some((mut budget, timeout)) = configuration.text_context() else {
+            return write_failed_frame(
+                &mut io,
+                lane,
+                "translator is awaiting settings",
+                admission.frame_capacity,
+            );
+        };
+        let text = request.text().map_err(ServerError::Transport)?;
+        let query = decode_public(text, &mut budget)?;
+        if matches!(query, signal_herdr_nexus::Query::Subscribe(_)) {
+            drop(io);
+            return forward_public_stream(
+                stream,
                 configuration,
                 place,
-                caller.clone(),
-                text,
-                bootstrap_budget,
-                admission.deadline,
-            )?;
-            Frame { lane: Lane::MetaText, kind: Kind::Answered, payload: response.into_bytes() }
+                caller,
+                query,
+                admission.frame_capacity,
+            );
         }
-        Lane::PublicText => {
-            let Some((mut budget, timeout)) = configuration.text_context() else {
-                return Err(ServerError::Signal("translator is awaiting settings".into()));
-            };
-            let text = request.text().map_err(ServerError::Transport)?;
-            let query = decode_public(text, &mut budget)?;
-            let response = forward_public(place, caller, query, timeout)?;
-            Frame { lane: Lane::PublicText, kind: Kind::Answered, payload: shared_translator::encode(&response).into_bytes() }
-        }
-    }) })();
+        let response = forward_public(place, caller, query, timeout)?;
+        let response = Frame {
+            lane: Lane::PublicText,
+            kind: Kind::Answered,
+            payload: shared_translator::encode(&response).into_bytes(),
+        };
+        return transport::write_frame(&mut io, &response, admission.frame_capacity)
+            .map_err(ServerError::Transport);
+    }
+    let response = (|| -> Result<Frame, ServerError> {
+        Ok(match request.lane {
+            Lane::EmissionSignal => {
+                let query = Signal::<emission_herdr_nexus::Query>::from(request.payload)
+                    .restore()
+                    .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+                let Some(runtime) = configuration.runtime() else {
+                    return Err(ServerError::Signal(
+                        "translator is awaiting settings".into(),
+                    ));
+                };
+                let emission_herdr_nexus::Query::Emit(herdr) = query;
+                let response = emission_herdr_nexus::Response::Emitted(execute(&runtime, &herdr))
+                    .signalize()
+                    .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+                Frame {
+                    lane: Lane::EmissionSignal,
+                    kind: Kind::Answered,
+                    payload: response.bytes().to_vec(),
+                }
+            }
+            Lane::MetaText => {
+                let text = request.text().map_err(ServerError::Transport)?;
+                let response = configure_text(
+                    configuration,
+                    place,
+                    caller.clone(),
+                    text,
+                    bootstrap_budget,
+                    admission.deadline,
+                )?;
+                Frame {
+                    lane: Lane::MetaText,
+                    kind: Kind::Answered,
+                    payload: response.into_bytes(),
+                }
+            }
+            Lane::PublicText => {
+                unreachable!("public text is handled as a potentially streaming request above")
+            }
+        })
+    })();
     let response = match response {
         Ok(response) => response,
         Err(error) => Frame {
@@ -175,46 +250,108 @@ impl TranslatorConfiguration {
     }
     fn runtime(&self) -> Option<Runtime> {
         let partial = self.partial.read().ok()?.clone();
-        Runtime::new(partial.executable?, partial.call_timeout?, partial.output_limit?)
-            .filter(|_| partial.text_budget.is_some())
+        Runtime::new(
+            partial.executable?,
+            partial.call_timeout?,
+            partial.output_limit?,
+        )
+        .filter(|_| partial.text_budget.is_some())
     }
 
     #[cfg(feature = "text")]
     fn text_context(&self) -> Option<(datom_codec::Budget, Duration)> {
         let partial = self.partial.read().ok()?.clone();
         let (nodes, depth) = partial.text_budget?;
-        Some((datom_codec::Budget {
-            remaining: i64::try_from(nodes).ok()?,
-            reader: protos::ReaderBudget { remaining: nodes },
-            depth: 0,
-            maximum_depth: i64::try_from(depth).ok()?,
-        }, partial.call_timeout?))
+        Some((
+            datom_codec::Budget {
+                remaining: i64::try_from(nodes).ok()?,
+                reader: protos::ReaderBudget { remaining: nodes },
+                depth: 0,
+                maximum_depth: i64::try_from(depth).ok()?,
+            },
+            partial.call_timeout?,
+        ))
     }
 
     fn apply(&self, setting: meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nexus::Response {
-        use meta_signal_herdr_nexus::{Configured_Data, Owner, Readiness, Response, Set, SettingName};
-        let mut partial = self.partial.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        use meta_signal_herdr_nexus::{
+            Configured_Data, Owner, Readiness, Response, Set, SettingName,
+        };
+        let mut partial = self
+            .partial
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let invalid = match setting {
-            Set::HerdrPath(value) if Path::new(&value.0).is_absolute() => { partial.executable = Some(PathBuf::from(value.0)); None }
-            Set::CallTimeout(value) => positive_duration(value.0).map(|value| { partial.call_timeout = Some(value); }).is_none().then_some(SettingName::CallTimeout),
-            Set::OutputLimit(value) => usize::try_from(value.0).ok().filter(|value| *value > 0).map(|value| { partial.output_limit = Some(value); }).is_none().then_some(SettingName::OutputLimit),
+            Set::HerdrPath(value) if Path::new(&value.0).is_absolute() => {
+                partial.executable = Some(PathBuf::from(value.0));
+                None
+            }
+            Set::CallTimeout(value) => positive_duration(value.0)
+                .map(|value| {
+                    partial.call_timeout = Some(value);
+                })
+                .is_none()
+                .then_some(SettingName::CallTimeout),
+            Set::OutputLimit(value) => usize::try_from(value.0)
+                .ok()
+                .filter(|value| *value > 0)
+                .map(|value| {
+                    partial.output_limit = Some(value);
+                })
+                .is_none()
+                .then_some(SettingName::OutputLimit),
             Set::TextBudget(value) => {
-                let nodes = usize::try_from(value.node_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES);
-                let depth = usize::try_from(value.depth_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH);
-                match (nodes, depth) { (Some(nodes), Some(depth)) => { partial.text_budget = Some((nodes, depth)); None }, _ => Some(SettingName::TextBudget) }
+                let nodes = usize::try_from(value.node_limit.0)
+                    .ok()
+                    .filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES);
+                let depth = usize::try_from(value.depth_limit.0)
+                    .ok()
+                    .filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH);
+                match (nodes, depth) {
+                    (Some(nodes), Some(depth)) => {
+                        partial.text_budget = Some((nodes, depth));
+                        None
+                    }
+                    _ => Some(SettingName::TextBudget),
+                }
             }
             Set::HerdrPath(_) => Some(SettingName::HerdrPath),
-            other => return Response::ConfigureRefused(invalid_setting(Owner::Translator, setting_name(&other), "setting belongs to Nexus")),
+            other => {
+                return Response::ConfigureRefused(invalid_setting(
+                    Owner::Translator,
+                    setting_name(&other),
+                    "setting belongs to Nexus",
+                ))
+            }
         };
         if let Some(name) = invalid {
-            return Response::ConfigureRefused(invalid_setting(Owner::Translator, name, "invalid setting value"));
+            return Response::ConfigureRefused(invalid_setting(
+                Owner::Translator,
+                name,
+                "invalid setting value",
+            ));
         }
         let mut awaiting = Vec::new();
-        if partial.executable.is_none() { awaiting.push(SettingName::HerdrPath); }
-        if partial.call_timeout.is_none() { awaiting.push(SettingName::CallTimeout); }
-        if partial.output_limit.is_none() { awaiting.push(SettingName::OutputLimit); }
-        if partial.text_budget.is_none() { awaiting.push(SettingName::TextBudget); }
-        Response::Configured(Configured_Data { owner: Owner::Translator, readiness: if awaiting.is_empty() { Readiness::Ready } else { Readiness::Awaiting(awaiting) } })
+        if partial.executable.is_none() {
+            awaiting.push(SettingName::HerdrPath);
+        }
+        if partial.call_timeout.is_none() {
+            awaiting.push(SettingName::CallTimeout);
+        }
+        if partial.output_limit.is_none() {
+            awaiting.push(SettingName::OutputLimit);
+        }
+        if partial.text_budget.is_none() {
+            awaiting.push(SettingName::TextBudget);
+        }
+        Response::Configured(Configured_Data {
+            owner: Owner::Translator,
+            readiness: if awaiting.is_empty() {
+                Readiness::Ready
+            } else {
+                Readiness::Awaiting(awaiting)
+            },
+        })
     }
 }
 
@@ -230,14 +367,15 @@ fn configure_text(
     use datom_codec::{Actualizing, Potential};
     let mut budget = budget(bootstrap_limits);
     let mut potential = Potential::<meta_signal_herdr_nexus::Query>::from(text);
-    let query = potential.actualize(&mut budget)
+    let query = potential
+        .actualize(&mut budget)
         .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
     let meta_signal_herdr_nexus::Query::Configure(setting) = query;
     let response = match setting {
         setting @ (meta_signal_herdr_nexus::Set::HerdrPath(_)
-            | meta_signal_herdr_nexus::Set::CallTimeout(_)
-            | meta_signal_herdr_nexus::Set::OutputLimit(_)
-            | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
+        | meta_signal_herdr_nexus::Set::CallTimeout(_)
+        | meta_signal_herdr_nexus::Set::OutputLimit(_)
+        | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
             let timeout = configuration.call_timeout().unwrap_or(bootstrap_timeout);
             forward_meta(place, caller, core_setting(setting), timeout)?
@@ -257,24 +395,41 @@ fn budget((nodes, depth): (usize, usize)) -> datom_codec::Budget {
 }
 
 fn validated_budget(value: &meta_signal_herdr_nexus::BudgetValue) -> Option<(usize, usize)> {
-    let nodes = usize::try_from(value.node_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES)?;
-    let depth = usize::try_from(value.depth_limit.0).ok().filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH)?;
+    let nodes = usize::try_from(value.node_limit.0)
+        .ok()
+        .filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_BYTES)?;
+    let depth = usize::try_from(value.depth_limit.0)
+        .ok()
+        .filter(|value| *value > 0 && *value <= signal::MAXIMUM_SIGNAL_DEPTH)?;
     Some((nodes, depth))
 }
 
 #[cfg(feature = "text")]
-fn decode_public(text: &str, budget: &mut datom_codec::Budget) -> Result<signal_herdr_nexus::Query, ServerError> {
+fn decode_public(
+    text: &str,
+    budget: &mut datom_codec::Budget,
+) -> Result<signal_herdr_nexus::Query, ServerError> {
     use datom_codec::{Actualizing, Potential};
     let mut potential = Potential::<signal_herdr_nexus::Query>::from(text);
-    potential.actualize(budget).map_err(|error| ServerError::Signal(format!("{error:?}")))
+    potential
+        .actualize(budget)
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))
 }
 
 fn core_setting(setting: meta_signal_herdr_nexus::Set) -> core_meta_herdr_nexus::CoreSet {
     match setting {
-        meta_signal_herdr_nexus::Set::StartTimeout(value) => core_meta_herdr_nexus::CoreSet::StartTimeout(value),
-        meta_signal_herdr_nexus::Set::Polling(value) => core_meta_herdr_nexus::CoreSet::Polling(value),
-        meta_signal_herdr_nexus::Set::FrameCapacity(value) => core_meta_herdr_nexus::CoreSet::FrameCapacity(value),
-        meta_signal_herdr_nexus::Set::TransportTimeout(value) => core_meta_herdr_nexus::CoreSet::TransportTimeout(value),
+        meta_signal_herdr_nexus::Set::StartTimeout(value) => {
+            core_meta_herdr_nexus::CoreSet::StartTimeout(value)
+        }
+        meta_signal_herdr_nexus::Set::Polling(value) => {
+            core_meta_herdr_nexus::CoreSet::Polling(value)
+        }
+        meta_signal_herdr_nexus::Set::FrameCapacity(value) => {
+            core_meta_herdr_nexus::CoreSet::FrameCapacity(value)
+        }
+        meta_signal_herdr_nexus::Set::TransportTimeout(value) => {
+            core_meta_herdr_nexus::CoreSet::TransportTimeout(value)
+        }
         _ => unreachable!("translator settings are handled before core conversion"),
     }
 }
@@ -285,17 +440,93 @@ fn forward_public(
     input: signal_herdr_nexus::Query,
     timeout: Duration,
 ) -> Result<signal_herdr_nexus::Response, ServerError> {
-    let request = herdr_nexus_wire::public_call::Query::Call(
-        herdr_nexus_wire::public_call::Call_Data {
+    let request =
+        herdr_nexus_wire::public_call::Query::Call(herdr_nexus_wire::public_call::Call_Data {
             caller,
             input: herdr_nexus_wire::public_payload::Input(input),
-        },
-    );
-    let response: herdr_nexus_wire::public_call::Response =
-        binary_call(Path::new(&place.directory.0).join("herdr.sock"), request, timeout)?;
+        });
+    let response: herdr_nexus_wire::public_call::Response = binary_call(
+        Path::new(&place.directory.0).join("herdr.sock"),
+        request,
+        timeout,
+    )?;
     match response {
         herdr_nexus_wire::public_call::Response::Answered(output) => Ok(output.0),
-        herdr_nexus_wire::public_call::Response::Failed(message) => Err(ServerError::Signal(message)),
+        herdr_nexus_wire::public_call::Response::Failed(message) => {
+            Err(ServerError::Signal(message))
+        }
+    }
+}
+
+fn forward_public_stream(
+    client: &UnixStream,
+    configuration: &TranslatorConfiguration,
+    place: &Place,
+    caller: crate::transport_types::Caller,
+    input: signal_herdr_nexus::Query,
+    admission_limit: usize,
+) -> Result<(), ServerError> {
+    use shared_translator::{FrameReading, FrameWriting};
+    let request =
+        herdr_nexus_wire::public_call::Query::Call(herdr_nexus_wire::public_call::Call_Data {
+            caller,
+            input: herdr_nexus_wire::public_payload::Input(input),
+        });
+    let core = UnixStream::connect(Path::new(&place.directory.0).join("herdr.sock"))
+        .map_err(ServerError::Io)?;
+    let timeout = configuration
+        .call_timeout()
+        .ok_or_else(|| ServerError::Signal("translator is awaiting CallTimeout".into()))?;
+    let mut core_write = herdr_nexus_wire::deadline::DeadlineStream::new(
+        core.try_clone().map_err(ServerError::Io)?,
+        timeout,
+    )
+    .map_err(ServerError::Io)?;
+    let request = request
+        .signalize()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+    core_write
+        .write_frame(&request, FrameCapacity::from(MAXIMUM_SIGNAL_BYTES))
+        .map_err(ServerError::Frame)?;
+    loop {
+        let timeout = configuration
+            .call_timeout()
+            .ok_or_else(|| ServerError::Signal("translator is awaiting CallTimeout".into()))?;
+        let mut core_read = herdr_nexus_wire::deadline::DeadlineStream::new(
+            core.try_clone().map_err(ServerError::Io)?,
+            timeout,
+        )
+        .map_err(ServerError::Io)?;
+        let body = match core_read.read_frame(FrameCapacity::from(MAXIMUM_SIGNAL_BYTES)) {
+            Ok(body) => body,
+            Err(signal::FrameError::Io(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                return Ok(())
+            }
+            Err(error) => return Err(ServerError::Frame(error)),
+        };
+        let response = Signal::<herdr_nexus_wire::public_call::Response>::from(Vec::from(body))
+            .restore()
+            .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+        let response = match response {
+            herdr_nexus_wire::public_call::Response::Answered(output) => output.0,
+            herdr_nexus_wire::public_call::Response::Failed(message) => {
+                return Err(ServerError::Signal(message));
+            }
+        };
+        let frame = crate::transport::Frame {
+            lane: crate::transport_types::Lane::PublicText,
+            kind: crate::transport_types::Kind::Answered,
+            payload: shared_translator::encode(&response).into_bytes(),
+        };
+        let mut client_write = herdr_nexus_wire::deadline::DeadlineStream::new(
+            client.try_clone().map_err(ServerError::Io)?,
+            timeout,
+        )
+        .map_err(ServerError::Io)?;
+        crate::transport::write_frame(&mut client_write, &frame, admission_limit)
+            .map_err(ServerError::Transport)?;
     }
 }
 
@@ -305,21 +536,27 @@ fn forward_meta(
     input: core_meta_herdr_nexus::CoreSet,
     timeout: Duration,
 ) -> Result<meta_signal_herdr_nexus::Response, ServerError> {
-    let request = herdr_nexus_wire::meta_call::Query::Call(
-        herdr_nexus_wire::meta_call::Call_Data {
+    let request =
+        herdr_nexus_wire::meta_call::Query::Call(herdr_nexus_wire::meta_call::Call_Data {
             caller,
-            input: herdr_nexus_wire::meta_payload::Input(core_meta_herdr_nexus::Query::Configure(input)),
-        },
-    );
-    let response: herdr_nexus_wire::meta_call::Response =
-        binary_call(Path::new(&place.directory.0).join("herdr-meta.sock"), request, timeout)?;
+            input: herdr_nexus_wire::meta_payload::Input(core_meta_herdr_nexus::Query::Configure(
+                input,
+            )),
+        });
+    let response: herdr_nexus_wire::meta_call::Response = binary_call(
+        Path::new(&place.directory.0).join("herdr-meta.sock"),
+        request,
+        timeout,
+    )?;
     match response {
         herdr_nexus_wire::meta_call::Response::Answered(output) => match output.0 {
             core_meta_herdr_nexus::Response::Configured(readiness) => {
-                Ok(meta_signal_herdr_nexus::Response::Configured(meta_signal_herdr_nexus::Configured_Data {
-                    owner: meta_signal_herdr_nexus::Owner::Nexus,
-                    readiness,
-                }))
+                Ok(meta_signal_herdr_nexus::Response::Configured(
+                    meta_signal_herdr_nexus::Configured_Data {
+                        owner: meta_signal_herdr_nexus::Owner::Nexus,
+                        readiness,
+                    },
+                ))
             }
             core_meta_herdr_nexus::Response::ConfigureRefused(refusal) => {
                 Ok(meta_signal_herdr_nexus::Response::ConfigureRefused(refusal))
@@ -339,11 +576,16 @@ where
     let stream = UnixStream::connect(path).map_err(ServerError::Io)?;
     let mut stream = herdr_nexus_wire::deadline::DeadlineStream::new(stream, timeout)
         .map_err(ServerError::Io)?;
-    let request = query.signalize().map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+    let request = query
+        .signalize()
+        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
     let capacity = FrameCapacity::from(MAXIMUM_SIGNAL_BYTES);
-    stream.write_frame(&request, capacity).map_err(ServerError::Frame)?;
+    stream
+        .write_frame(&request, capacity)
+        .map_err(ServerError::Frame)?;
     let response = stream.read_frame(capacity).map_err(ServerError::Frame)?;
-    Signal::<R>::from(Vec::from(response)).restore()
+    Signal::<R>::from(Vec::from(response))
+        .restore()
         .map_err(|error| ServerError::Signal(format!("{error:?}")))
 }
 
@@ -361,9 +603,15 @@ fn setting_name(setting: &meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nex
     }
 }
 
-fn invalid_setting(owner: meta_signal_herdr_nexus::Owner, setting_name: meta_signal_herdr_nexus::SettingName, message: &str) -> meta_signal_herdr_nexus::ConfigurationRefusal {
+fn invalid_setting(
+    owner: meta_signal_herdr_nexus::Owner,
+    setting_name: meta_signal_herdr_nexus::SettingName,
+    message: &str,
+) -> meta_signal_herdr_nexus::ConfigurationRefusal {
     meta_signal_herdr_nexus::ConfigurationRefusal::Invalid(meta_signal_herdr_nexus::Invalid_Data {
-        owner, setting_name, message: meta_signal_herdr_nexus::Message(message.into()),
+        owner,
+        setting_name,
+        message: meta_signal_herdr_nexus::Message(message.into()),
     })
 }
 
@@ -466,16 +714,14 @@ fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invoc
                 values.push(OsString::from(&program.0));
             }
             values.push(OsString::from("--timeout"));
-            values.push(OsString::from(
-                start_timeout.as_millis().to_string(),
-            ));
+            values.push(OsString::from(start_timeout.as_millis().to_string()));
             if !data.command.string_vector.is_empty() {
                 values.push(OsString::from("--"));
                 values.extend(data.command.string_vector.iter().map(OsString::from));
             }
             (
                 values,
-            start_timeout,
+                start_timeout,
                 Decoder::AgentStart {
                     pane_id: data.pane_id.0.clone(),
                     name: data.command.agent_name.0.clone(),
@@ -949,7 +1195,7 @@ mod tests {
             },
             (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
         )
-            .expect("isolated request served");
+        .expect("isolated request served");
         read_frame(&mut client, MAXIMUM_SIGNAL_BYTES).expect("response frame")
     }
 
@@ -958,11 +1204,16 @@ mod tests {
         use crate::transport::{read_frame, write_frame, Frame};
         use crate::transport_types::{Kind, Lane};
         let (mut client, mut server) = UnixStream::pair().expect("socket pair");
-        write_frame(&mut client, &Frame {
-            lane: Lane::MetaText,
-            kind: Kind::Request,
-            payload: b"Configure.HerdrPath./bin/true".to_vec(),
-        }, MAXIMUM_SIGNAL_BYTES).expect("request frame");
+        write_frame(
+            &mut client,
+            &Frame {
+                lane: Lane::MetaText,
+                kind: Kind::Request,
+                payload: b"Configure.HerdrPath./bin/true".to_vec(),
+            },
+            MAXIMUM_SIGNAL_BYTES,
+        )
+        .expect("request frame");
         let place = Place {
             metaflow_name: shared_translator::placement::MetaflowName("test".into()),
             directory: shared_translator::placement::Directory("/tmp".into()),
@@ -972,10 +1223,19 @@ mod tests {
             &TranslatorConfiguration::default(),
             &place,
             Endpoint::Public,
-            herdr_nexus_wire::ValidAdmission { deadline: Duration::from_secs(1), frame_capacity: MAXIMUM_SIGNAL_BYTES },
+            herdr_nexus_wire::ValidAdmission {
+                deadline: Duration::from_secs(1),
+                frame_capacity: MAXIMUM_SIGNAL_BYTES,
+            },
             (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
-        ).expect("wrong lane answered");
-        assert_eq!(read_frame(&mut client, MAXIMUM_SIGNAL_BYTES).expect("response").kind, Kind::Failed);
+        )
+        .expect("wrong lane answered");
+        assert_eq!(
+            read_frame(&mut client, MAXIMUM_SIGNAL_BYTES)
+                .expect("response")
+                .kind,
+            Kind::Failed
+        );
     }
 
     #[test]
@@ -985,11 +1245,10 @@ mod tests {
         let malformed = meta_request(&configuration, "this is not datom");
         assert_eq!(malformed.kind, Kind::Failed);
 
-        let query = meta_signal_herdr_nexus::Query::Configure(
-            meta_signal_herdr_nexus::Set::HerdrPath(
+        let query =
+            meta_signal_herdr_nexus::Query::Configure(meta_signal_herdr_nexus::Set::HerdrPath(
                 meta_signal_herdr_nexus::PathValue("/usr/bin/herdr".into()),
-            ),
-        );
+            ));
         let answered = meta_request(&configuration, &shared_translator::encode(&query));
         assert_eq!(answered.kind, Kind::Answered);
         let text = std::str::from_utf8(&answered.payload).expect("UTF-8 response");

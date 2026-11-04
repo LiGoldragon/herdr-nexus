@@ -17,29 +17,76 @@ pub struct TextClient {
 
 impl TextClient {
     pub fn new(socket: impl Into<std::path::PathBuf>, admission_limit: usize) -> Self {
-        Self { socket: socket.into(), admission_limit }
+        Self {
+            socket: socket.into(),
+            admission_limit,
+        }
     }
 
     pub fn request(&self, lane: Lane, text: &str) -> Result<String, ClientError> {
+        let mut first = None;
+        self.request_stream(lane, text, |answer| {
+            if first.is_none() {
+                first = Some(answer.to_owned());
+            }
+            false
+        })?;
+        first.ok_or_else(|| ClientError::Protocol("translator closed without an answer".into()))
+    }
+
+    /// Delivers each answer in order. Returning false stops after that answer;
+    /// returning true keeps the nondurable subscription connection open.
+    pub fn request_stream(
+        &self,
+        lane: Lane,
+        text: &str,
+        mut receive: impl FnMut(&str) -> bool,
+    ) -> Result<(), ClientError> {
         if lane == Lane::EmissionSignal {
             return Err(ClientError::Transport(TransportError::WrongLane));
         }
-        let mut stream = std::os::unix::net::UnixStream::connect(&self.socket)
-            .map_err(ClientError::Io)?;
-        transport::write_frame(&mut stream, &Frame {
-            lane: lane.clone(), kind: Kind::Request, payload: text.as_bytes().to_vec(),
-        }, self.admission_limit).map_err(ClientError::Transport)?;
-        let response = transport::read_frame(&mut stream, self.admission_limit)
-            .map_err(ClientError::Transport)?;
-        if response.lane != lane {
-            return Err(ClientError::Protocol("translator answered on another lane".into()));
-        }
-        let text = String::from_utf8(response.payload)
-            .map_err(|_| ClientError::Protocol("translator returned non-UTF-8 text".into()))?;
-        match response.kind {
-            Kind::Answered => Ok(text),
-            Kind::Failed => Err(ClientError::Protocol(text)),
-            Kind::Request => Err(ClientError::Protocol("translator answered with request kind".into())),
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(&self.socket).map_err(ClientError::Io)?;
+        transport::write_frame(
+            &mut stream,
+            &Frame {
+                lane: lane.clone(),
+                kind: Kind::Request,
+                payload: text.as_bytes().to_vec(),
+            },
+            self.admission_limit,
+        )
+        .map_err(ClientError::Transport)?;
+        let mut received = false;
+        loop {
+            let response = match transport::read_frame(&mut stream, self.admission_limit) {
+                Ok(response) => response,
+                Err(TransportError::Io(error))
+                    if received && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(())
+                }
+                Err(error) => return Err(ClientError::Transport(error)),
+            };
+            if response.lane != lane {
+                return Err(ClientError::Protocol(
+                    "translator answered on another lane".into(),
+                ));
+            }
+            let text = String::from_utf8(response.payload)
+                .map_err(|_| ClientError::Protocol("translator returned non-UTF-8 text".into()))?;
+            match response.kind {
+                Kind::Answered if receive(&text) => {
+                    received = true;
+                }
+                Kind::Answered => return Ok(()),
+                Kind::Failed => return Err(ClientError::Protocol(text)),
+                Kind::Request => {
+                    return Err(ClientError::Protocol(
+                        "translator answered with request kind".into(),
+                    ))
+                }
+            }
         }
     }
 }

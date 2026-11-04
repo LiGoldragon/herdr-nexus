@@ -6,18 +6,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let place = {
         let mut input = std::io::stdin().lock();
         let body = input.read_frame(bootstrap_capacity)?;
-        let bootstrap = Signal::<herdr_nexus_wire::transport_types::CoreBootstrap>::from(
-            Vec::<u8>::from(body),
-        )
-        .restore()?;
+        let bootstrap =
+            Signal::<herdr_nexus_wire::transport_types::CoreBootstrap>::from(Vec::<u8>::from(body))
+                .restore()?;
         drop(input);
         nix::unistd::close(0)?;
         bootstrap
     };
     let admission = herdr_nexus_wire::ValidAdmission::try_from(&place.admission)
         .map_err(|message| format!("invalid core bootstrap admission: {message}"))?;
-    let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(&place.place, admission)?);
-    let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(bootstrap.paths()));
+    let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(
+        &place.place,
+        admission,
+    )?);
+    let dispatcher = Arc::new(herdr_nexus_daemon::Dispatcher::new(
+        bootstrap.paths(),
+        bootstrap.configuration_store(),
+    ));
 
     let meta = Arc::clone(&bootstrap);
     std::thread::spawn(move || loop {
@@ -38,7 +43,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     configuration.transport_timeout,
                 )?;
                 let body = input.read_frame(capacity)?;
-                let call = Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(body)).restore()?;
+                let call =
+                    Signal::<herdr_nexus_wire::public_call::Query>::from(Vec::<u8>::from(body))
+                        .restore()?;
                 let herdr_nexus_wire::public_call::Query::Call(call) = call;
                 if !herdr_nexus_daemon::same_login(&call.caller) {
                     let refusal = herdr_nexus_wire::public_call::Response::Failed(
@@ -59,8 +66,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let response = herdr_nexus_wire::public_call::Response::Answered(
                     herdr_nexus_wire::public_payload::Output(response),
                 );
-                let mut output =
-                    herdr_nexus_daemon::DeadlineStream::new(stream, configuration.transport_timeout)?;
+                let mut output = herdr_nexus_daemon::DeadlineStream::new(
+                    stream,
+                    configuration.transport_timeout,
+                )?;
                 output.write_frame(&response.signalize()?, capacity)?;
                 Ok(())
             })();

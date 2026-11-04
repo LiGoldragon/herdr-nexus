@@ -84,9 +84,7 @@ impl InMemory {
                 owned.label.clone().map(|label| Known {
                     pane: owned.pane.clone(),
                     label,
-                    state: by_pane
-                        .get(&owned.pane)
-                        .map_or(State::Dead, |seen| seen.state.clone()),
+                    state: reconciled_state(owned, by_pane.get(&owned.pane).copied()),
                 })
             })
             .collect()
@@ -143,11 +141,22 @@ impl Memory for InMemory {
             .values_mut()
             .filter(|owned| &owned.pane.session == session)
         {
-            owned.state = by_pane
-                .get(&owned.pane)
-                .map_or(State::Dead, |seen| seen.state.clone());
+            owned.state = reconciled_state(owned, by_pane.get(&owned.pane).copied());
         }
         Ok(known)
+    }
+}
+
+fn reconciled_state(owned: &OwnedPane, seen: Option<&PaneObservation>) -> State {
+    match seen {
+        None => State::Dead,
+        Some(seen)
+            if seen.state == State::Open
+                && matches!(owned.state, State::Busy | State::Idle | State::Dead) =>
+        {
+            State::Dead
+        }
+        Some(seen) => seen.state.clone(),
     }
 }
 
@@ -155,7 +164,10 @@ fn same_uncertainty_locus(left: &Attempt, right: &Attempt) -> bool {
     use Attempt::*;
     fn pane(attempt: &Attempt) -> Option<&Pane> {
         match attempt {
-            Attempt::Start(pane) | Attempt::Prompt(pane) | Attempt::Press(pane) | Attempt::Close(pane) => Some(pane),
+            Attempt::Start(pane)
+            | Attempt::Prompt(pane)
+            | Attempt::Press(pane)
+            | Attempt::Close(pane) => Some(pane),
             _ => None,
         }
     }
@@ -505,8 +517,14 @@ mod tests {
     #[test]
     fn repeated_uncertainty_replaces_the_one_record_for_its_pane() {
         let mut core = Core::new(seeded());
-        assert_eq!(core.prompt(pane(), ExternalResult::Uncertain), Outcome::Uncertain);
-        assert_eq!(core.press(pane(), ExternalResult::Uncertain), Outcome::Uncertain);
+        assert_eq!(
+            core.prompt(pane(), ExternalResult::Uncertain),
+            Outcome::Uncertain
+        );
+        assert_eq!(
+            core.press(pane(), ExternalResult::Uncertain),
+            Outcome::Uncertain
+        );
         assert_eq!(core.memory().uncertain().len(), 1);
         assert_eq!(core.memory().uncertain()[0].attempt, Attempt::Press(pane()));
     }

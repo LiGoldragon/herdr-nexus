@@ -1,13 +1,16 @@
-use herdr_nexus_translator::{registry, TextClient};
 use herdr_nexus_translator::transport_types::Lane;
+use herdr_nexus_translator::{registry, TextClient};
 use std::{env, fs};
 
 fn budget() -> datom_codec::Budget {
     datom_codec::Budget {
         remaining: i64::try_from(signal::MAXIMUM_SIGNAL_BYTES).expect("signal bound fits budget"),
-        reader: protos::ReaderBudget { remaining: signal::MAXIMUM_SIGNAL_BYTES },
+        reader: protos::ReaderBudget {
+            remaining: signal::MAXIMUM_SIGNAL_BYTES,
+        },
         depth: 0,
-        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH).expect("signal depth fits budget"),
+        maximum_depth: i64::try_from(signal::MAXIMUM_SIGNAL_DEPTH)
+            .expect("signal depth fits budget"),
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +26,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::path::Path::new(&place.directory.0).join(names.public_translator_socket.0),
         signal::MAXIMUM_SIGNAL_BYTES,
     );
-    println!("{}", client.request(Lane::PublicText, &text)?);
+    client.request_stream(Lane::PublicText, &text, |answer| {
+        println!("{answer}");
+        true
+    })?;
     Ok(())
 }
