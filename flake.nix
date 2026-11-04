@@ -54,7 +54,7 @@
           paths = [ daemon translator cli ];
         };
         };
-        checks = {
+        checks = rec {
           test = rust.craneLib.cargoTest {
             pname = "herdr-nexus-test";
             version = "0.1.0";
@@ -77,6 +77,50 @@
             declaration = ./ethos/emission.ethos;
             committed = ./crates/emission/src/generated/emission.rs;
           } (builtins.readFile ./checks/generated-contract.sh);
+          transport-generated = pkgs.runCommand "herdr-transport-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/transport.ethos;
+            committed = ./crates/wire/src/transport_types.rs;
+            normalization = "transport";
+          } (builtins.readFile ./checks/generated-contract-normalized.sh);
+          public-call-generated = pkgs.runCommand "herdr-public-call-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/public-call.ethos;
+            committed = ./crates/wire/src/public_call.rs;
+            normalization = "public-call";
+          } (builtins.readFile ./checks/generated-contract-normalized.sh);
+          public-payload-generated = pkgs.runCommand "herdr-public-payload-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/public-payload.ethos;
+            committed = ./crates/wire/src/public_payload.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
+          meta-call-generated = pkgs.runCommand "herdr-meta-call-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/meta-call.ethos;
+            committed = ./crates/wire/src/meta_call.rs;
+            normalization = "meta-call";
+          } (builtins.readFile ./checks/generated-contract-normalized.sh);
+          meta-payload-generated = pkgs.runCommand "herdr-meta-payload-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/meta-payload.ethos;
+            committed = ./crates/wire/src/meta_payload.rs;
+          } (builtins.readFile ./checks/generated-contract.sh);
+          core-meta-generated = pkgs.runCommand "herdr-core-meta-generated" {
+            generator = ethos-zero.packages.${system}.default;
+            declaration = ./ethos/core-meta.ethos;
+            committed = ./crates/core-meta/src/lib.rs;
+            normalization = "core-meta";
+          } (builtins.readFile ./checks/generated-contract-normalized.sh);
+          generated = pkgs.runCommand "herdr-generated-contracts" {
+            contracts = [
+              operation-generated memory-generated emission-generated
+              transport-generated public-call-generated public-payload-generated
+              meta-call-generated meta-payload-generated core-meta-generated
+            ];
+          } ''
+            for contract in $contracts; do test -e "$contract"; done
+            touch "$out"
+          '';
         };
         devShells.default = pkgs.mkShell {
           packages = [ rust.toolchain ];
