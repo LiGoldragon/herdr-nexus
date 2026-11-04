@@ -2,6 +2,9 @@
 
 pub mod runner;
 pub mod server;
+pub mod generated {
+    pub mod argument;
+}
 pub use herdr_nexus_wire::frame as transport;
 pub use herdr_nexus_wire::transport_types;
 

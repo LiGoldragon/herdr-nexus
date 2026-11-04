@@ -1,4 +1,5 @@
 use crate::runner::{self, Captured};
+use crate::generated::argument::{Arguable, ListArgument, PaneCloseArgument};
 use emission_herdr_nexus::{
     AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data,
     PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId, WorkspaceLabel,
@@ -819,13 +820,20 @@ fn invalid_setting(
 
 /// Executes one typed external emission with a captured configuration snapshot.
 pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
-    let Some(invocation) = invocation(&herdr.session, &herdr.verb, runtime) else {
-        return ExternalOutcome::Uncertain;
-    };
-    let Some(captured) = run_invocation(runtime, &invocation) else {
-        return ExternalOutcome::Uncertain;
-    };
-    decode(&invocation.decoder, captured, &herdr.session)
+    match &herdr.verb {
+        Verb::WorkspaceCreate(command) => execute_command(runtime, &herdr.session, command),
+        Verb::WorkspaceList => execute_command(runtime, &herdr.session, &ListArgument::Workspace),
+        Verb::AgentStart(command) => execute_command(runtime, &herdr.session, command),
+        Verb::AgentPrompt(command) => execute_command(runtime, &herdr.session, command),
+        Verb::Keys(command) => execute_command(runtime, &herdr.session, command),
+        Verb::PaneClose(pane_id) => execute_command(
+            runtime,
+            &herdr.session,
+            &PaneCloseArgument(pane_id.clone()),
+        ),
+        Verb::PaneList => execute_command(runtime, &herdr.session, &ListArgument::Pane),
+        Verb::AgentList => execute_command(runtime, &herdr.session, &ListArgument::Agent),
+    }
 }
 
 #[derive(Clone)]
@@ -853,241 +861,177 @@ fn positive_duration(milliseconds: i64) -> Option<Duration> {
     (milliseconds != 0).then(|| Duration::from_millis(milliseconds))
 }
 
-trait Arguable {
-    fn arguments(&self) -> Vec<OsString>;
-}
-
 impl Arguable for WorkspaceCreate_Data {
-    fn arguments(&self) -> Vec<OsString> {
+    fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
-            OsString::from("workspace"),
-            OsString::from("create"),
-            OsString::from("--cwd"),
-            OsString::from(&self.root.0),
-            OsString::from("--label"),
-            OsString::from(emission_herdr_nexus::managed_workspace_label(&self.creation_id).0),
+            "workspace".into(),
+            "create".into(),
+            "--cwd".into(),
+            self.root.0.clone(),
+            "--label".into(),
+            emission_herdr_nexus::managed_workspace_label(&self.creation_id).0,
         ];
         for variable in &self.variable_vector {
-            arguments.push(OsString::from("--env"));
-            arguments.push(OsString::from(format!(
-                "{}={}",
-                variable.name.0, variable.value.0
-            )));
+            arguments.push("--env".into());
+            arguments.push(format!("{}={}", variable.name.0, variable.value.0));
         }
         arguments
     }
 }
 
 impl Arguable for AgentStart_Data {
-    fn arguments(&self) -> Vec<OsString> {
+    fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
-            OsString::from("agent"),
-            OsString::from("start"),
-            OsString::from(&self.command.agent_name.0),
-            OsString::from("--kind"),
-            OsString::from(agent_kind(&self.command.agent_kind)),
-            OsString::from("--pane"),
-            OsString::from(&self.pane_id.0),
+            "agent".into(),
+            "start".into(),
+            self.command.agent_name.0.clone(),
+            "--kind".into(),
+            agent_kind(&self.command.agent_kind).into(),
+            "--pane".into(),
+            self.pane_id.0.clone(),
         ];
         if let Executable::Explicit(program) = &self.command.executable {
-            arguments.push(OsString::from("--executable"));
-            arguments.push(OsString::from(&program.0));
+            arguments.push("--executable".into());
+            arguments.push(program.0.clone());
         }
-        arguments.push(OsString::from("--timeout"));
-        arguments.push(OsString::from(self.timeout.0.to_string()));
+        arguments.push("--timeout".into());
+        arguments.push(self.timeout.0.to_string());
         if !self.command.string_vector.is_empty() {
-            arguments.push(OsString::from("--"));
-            arguments.extend(self.command.string_vector.iter().map(OsString::from));
+            arguments.push("--".into());
+            arguments.extend(self.command.string_vector.iter().cloned());
         }
         arguments
     }
 }
 
 impl Arguable for AgentPrompt_Data {
-    fn arguments(&self) -> Vec<OsString> {
+    fn arguments(&self) -> Vec<String> {
         vec![
-            OsString::from("agent"),
-            OsString::from("prompt"),
-            OsString::from(&self.pane_id.0),
-            OsString::from(&self.text.0),
+            "agent".into(),
+            "prompt".into(),
+            self.pane_id.0.clone(),
+            self.text.0.clone(),
         ]
     }
 }
 
 impl Arguable for Keys_Data {
-    fn arguments(&self) -> Vec<OsString> {
+    fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
-            OsString::from("pane"),
-            OsString::from("send-keys"),
-            OsString::from(&self.pane_id.0),
+            "pane".into(),
+            "send-keys".into(),
+            self.pane_id.0.clone(),
         ];
-        arguments.extend(self.keys.0.iter().map(OsString::from));
+        arguments.extend(self.keys.0.iter().cloned());
         arguments
     }
 }
 
-struct PaneCloseArgument<'a>(&'a PaneId);
-
-impl Arguable for PaneCloseArgument<'_> {
-    fn arguments(&self) -> Vec<OsString> {
+impl Arguable for PaneCloseArgument {
+    fn arguments(&self) -> Vec<String> {
         vec![
-            OsString::from("pane"),
-            OsString::from("close"),
-            OsString::from(&self.0.0),
+            "pane".into(),
+            "close".into(),
+            self.0.0.clone(),
         ]
     }
 }
 
-struct PaneListArgument;
-
-impl Arguable for PaneListArgument {
-    fn arguments(&self) -> Vec<OsString> {
-        vec![OsString::from("pane"), OsString::from("list")]
+impl Arguable for ListArgument {
+    fn arguments(&self) -> Vec<String> {
+        let collection = match self {
+            Self::Workspace => "workspace",
+            Self::Pane => "pane",
+            Self::Agent => "agent",
+        };
+        vec![collection.into(), "list".into()]
     }
 }
 
-struct WorkspaceListArgument;
-
-impl Arguable for WorkspaceListArgument {
-    fn arguments(&self) -> Vec<OsString> {
-        vec![OsString::from("workspace"), OsString::from("list")]
+trait ExternalCommand: Arguable {
+    fn timeout(&self, runtime: &Runtime) -> Option<Duration> {
+        Some(runtime.call_timeout)
     }
+    fn response_id(&self) -> &'static str;
+    fn decode_success(&self, stdout: &[u8], session: &Session) -> ExternalOutcome;
 }
 
-struct AgentListArgument;
-
-impl Arguable for AgentListArgument {
-    fn arguments(&self) -> Vec<OsString> {
-        vec![OsString::from("agent"), OsString::from("list")]
-    }
-}
-
-struct Invocation {
-    arguments: Vec<OsString>,
-    timeout: Duration,
-    decoder: Decoder,
-}
-
-enum Decoder {
-    WorkspaceCreate,
-    WorkspaceList,
-    AgentStart {
-        pane_id: String,
-        name: String,
-        kind: &'static str,
-    },
-    AgentPrompt {
-        pane_id: String,
-    },
-    Keys,
-    PaneClose,
-    PaneList,
-    AgentList,
-}
-
-fn invocation(session: &Session, verb: &Verb, runtime: &Runtime) -> Option<Invocation> {
-    let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
-    let (specific, timeout, decoder) = match verb {
-        Verb::WorkspaceCreate(data) => (data.arguments(), runtime.call_timeout, Decoder::WorkspaceCreate),
-        Verb::WorkspaceList => (
-            WorkspaceListArgument.arguments(),
-            runtime.call_timeout,
-            Decoder::WorkspaceList,
-        ),
-        Verb::AgentStart(data) => {
-            let start_timeout = positive_duration(data.timeout.0)?;
-            let kind = agent_kind(&data.command.agent_kind);
-            (
-                data.arguments(),
-                start_timeout,
-                Decoder::AgentStart {
-                    pane_id: data.pane_id.0.clone(),
-                    name: data.command.agent_name.0.clone(),
-                    kind,
-                },
-            )
-        }
-        Verb::AgentPrompt(data) => (
-            data.arguments(),
-            runtime.call_timeout,
-            Decoder::AgentPrompt {
-                pane_id: data.pane_id.0.clone(),
-            },
-        ),
-        Verb::Keys(data) => (data.arguments(), runtime.call_timeout, Decoder::Keys),
-        Verb::PaneClose(pane_id) => (
-            PaneCloseArgument(pane_id).arguments(),
-            runtime.call_timeout,
-            Decoder::PaneClose,
-        ),
-        Verb::PaneList => (
-            PaneListArgument.arguments(),
-            runtime.call_timeout,
-            Decoder::PaneList,
-        ),
-        Verb::AgentList => (
-            AgentListArgument.arguments(),
-            runtime.call_timeout,
-            Decoder::AgentList,
-        ),
+fn execute_command<T: ExternalCommand>(runtime: &Runtime, session: &Session, command: &T) -> ExternalOutcome {
+    let Some(timeout) = command.timeout(runtime) else {
+        return ExternalOutcome::Uncertain;
     };
-    arguments.extend(specific);
-    Some(Invocation {
-        arguments,
-        timeout,
-        decoder,
-    })
-}
-
-fn run_invocation(runtime: &Runtime, invocation: &Invocation) -> Option<Captured> {
-    let deadline = Instant::now().checked_add(invocation.timeout)?;
-    match runner::run(
-        &runtime.executable,
-        &invocation.arguments,
-        deadline,
-        runtime.output_limit,
-    ) {
-        Ok(captured) => Some(captured),
+    let Some(deadline) = Instant::now().checked_add(timeout) else {
+        return ExternalOutcome::Uncertain;
+    };
+    let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
+    arguments.extend(command.arguments().into_iter().map(OsString::from));
+    let captured = match runner::run(&runtime.executable, &arguments, deadline, runtime.output_limit) {
+        Ok(captured) => captured,
         Err(error) => {
             eprintln!("herdr client execution failed: {error}");
-            None
+            return ExternalOutcome::Uncertain;
         }
-    }
-}
-
-fn decode(decoder: &Decoder, captured: Captured, session: &Session) -> ExternalOutcome {
+    };
     if !captured.status.success() {
-        return refusal_or_uncertain(&captured, decoder.response_id());
+        return refusal_or_uncertain(&captured, command.response_id());
     }
-    match decoder {
-        Decoder::WorkspaceCreate => decode_workspace(&captured.stdout, session),
-        Decoder::WorkspaceList => decode_workspaces(&captured.stdout),
-        Decoder::AgentStart {
-            pane_id,
-            name,
-            kind,
-        } => decode_start(&captured.stdout, pane_id, name, kind),
-        Decoder::AgentPrompt { pane_id } => decode_prompt(&captured.stdout, pane_id),
-        // Herdr's send-keys CLI deliberately emits no success JSON.
-        Decoder::Keys if captured.stdout.is_empty() => ExternalOutcome::Done,
-        Decoder::Keys => ExternalOutcome::Uncertain,
-        Decoder::PaneClose => decode_ok(&captured.stdout, Some("cli:pane:close")),
-        Decoder::PaneList => decode_panes(&captured.stdout, session),
-        Decoder::AgentList => decode_agents(&captured.stdout, session),
+    command.decode_success(&captured.stdout, session)
+}
+
+impl ExternalCommand for WorkspaceCreate_Data {
+    fn response_id(&self) -> &'static str { "cli:workspace:create" }
+    fn decode_success(&self, stdout: &[u8], session: &Session) -> ExternalOutcome {
+        decode_workspace(stdout, session)
     }
 }
 
-impl Decoder {
+impl ExternalCommand for AgentStart_Data {
+    fn timeout(&self, _runtime: &Runtime) -> Option<Duration> { positive_duration(self.timeout.0) }
+    fn response_id(&self) -> &'static str { "cli:agent:start" }
+    fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
+        decode_start(
+            stdout,
+            &self.pane_id.0,
+            &self.command.agent_name.0,
+            agent_kind(&self.command.agent_kind),
+        )
+    }
+}
+
+impl ExternalCommand for AgentPrompt_Data {
+    fn response_id(&self) -> &'static str { "cli:agent:prompt" }
+    fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
+        decode_prompt(stdout, &self.pane_id.0)
+    }
+}
+
+impl ExternalCommand for Keys_Data {
+    fn response_id(&self) -> &'static str { "cli:pane:send-keys" }
+    fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
+        if stdout.is_empty() { ExternalOutcome::Done } else { ExternalOutcome::Uncertain }
+    }
+}
+
+impl ExternalCommand for PaneCloseArgument {
+    fn response_id(&self) -> &'static str { "cli:pane:close" }
+    fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
+        decode_ok(stdout, Some(self.response_id()))
+    }
+}
+
+impl ExternalCommand for ListArgument {
     fn response_id(&self) -> &'static str {
         match self {
-            Self::WorkspaceCreate => "cli:workspace:create",
-            Self::WorkspaceList => "cli:workspace:list",
-            Self::AgentStart { .. } => "cli:agent:start",
-            Self::AgentPrompt { .. } => "cli:agent:prompt",
-            Self::Keys => "cli:pane:send-keys",
-            Self::PaneClose => "cli:pane:close",
-            Self::PaneList => "cli:pane:list",
-            Self::AgentList => "cli:agent:list",
+            Self::Workspace => "cli:workspace:list",
+            Self::Pane => "cli:pane:list",
+            Self::Agent => "cli:agent:list",
+        }
+    }
+    fn decode_success(&self, stdout: &[u8], session: &Session) -> ExternalOutcome {
+        match self {
+            Self::Workspace => decode_workspaces(stdout),
+            Self::Pane => decode_panes(stdout, session),
+            Self::Agent => decode_agents(stdout, session),
         }
     }
 }
