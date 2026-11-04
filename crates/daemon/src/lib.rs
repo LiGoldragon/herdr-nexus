@@ -1275,12 +1275,13 @@ mod tests {
         listings:
             std::sync::Mutex<std::collections::VecDeque<emission_herdr_nexus::ExternalOutcome>>,
         list_count: std::sync::atomic::AtomicUsize,
+        list_start_timeouts: std::sync::Mutex<Vec<Duration>>,
     }
 
     impl ExternalEmitter for SubscriptionEmitter {
         fn emit(
             &self,
-            _configuration: &RuntimeConfiguration,
+            configuration: &RuntimeConfiguration,
             herdr: emission_herdr_nexus::Herdr,
         ) -> EmissionResult {
             use emission_herdr_nexus::{ExternalOutcome, Verb};
@@ -1288,6 +1289,10 @@ mod tests {
                 Verb::WorkspaceCreate(_) => ExternalOutcome::Created(self.pane.clone()),
                 Verb::AgentStart(_) => ExternalOutcome::Started(signal_herdr_nexus::State::Busy),
                 Verb::PaneList => {
+                    self.list_start_timeouts
+                        .lock()
+                        .expect("list configurations")
+                        .push(configuration.start_timeout);
                     self.list_count
                         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     self.listings
@@ -1325,6 +1330,7 @@ mod tests {
             pane: pane.clone(),
             listings: std::sync::Mutex::new(listings.into()),
             list_count: std::sync::atomic::AtomicUsize::new(0),
+            list_start_timeouts: std::sync::Mutex::new(Vec::new()),
         });
         let dispatcher = Arc::new(Dispatcher::with_emitter(&test_paths(), emitter.clone()));
         let configuration = test_configuration();
@@ -1480,5 +1486,29 @@ mod tests {
         client_b.set_read_timeout(Some(Duration::from_millis(35))).expect("short timeout b");
         use signal::FrameReading;
         assert!(client_b.read_frame(signal::FrameCapacity::from(4096)).is_err(), "late subscriber must not receive its current Busy twice");
+    }
+
+    #[test]
+    fn active_subscription_reads_replaced_configuration() {
+        let (dispatcher, emitter, pane) = started_dispatcher(Vec::new());
+        let (server, _client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        dispatcher.subscribe(server, pane.session, test_configuration()).expect("subscribe");
+        while emitter.list_count.load(std::sync::atomic::Ordering::SeqCst) < 1 {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let replacement = Arc::new(RuntimeConfiguration {
+            polling: Duration::from_millis(10),
+            start_timeout: Duration::from_millis(25),
+            frame_capacity_bytes: 4096,
+            transport_timeout: Duration::from_millis(40),
+        });
+        *dispatcher.configuration.current.write().expect("configuration") = Some(replacement);
+        let deadline = Instant::now() + Duration::from_millis(300);
+        while !emitter.list_start_timeouts.lock().expect("configurations")
+            .iter().any(|timeout| *timeout == Duration::from_millis(25))
+        {
+            assert!(Instant::now() < deadline, "subscription did not adopt replaced configuration");
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 }
