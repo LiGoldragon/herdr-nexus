@@ -1683,11 +1683,25 @@ impl ConfigurationStore {
     }
 
     fn register_peer_subscriber(&self, peer_id: &shared_translator::PeerId, generation: u64, queue: &Arc<SubscriberQueue>) -> bool {
+        self.register_peer_subscriber_after_validation(peer_id, generation, queue, || {})
+    }
+
+    fn register_peer_subscriber_after_validation(
+        &self,
+        peer_id: &shared_translator::PeerId,
+        generation: u64,
+        queue: &Arc<SubscriberQueue>,
+        after_validation: impl FnOnce(),
+    ) -> bool {
         let peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
         if peers.get(peer_id).map(|peer| peer.generation) != Some(generation) {
             queue.close();
             return false;
         }
+        // Rebinding takes the same peers lock before it removes and closes the
+        // old generation's queues.  Retaining this guard through insertion
+        // makes validation and registration one transaction with invalidation.
+        after_validation();
         self.peer_subscriber_queues
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -1960,6 +1974,84 @@ mod tests {
         let current = Arc::new(SubscriberQueue::new(1));
         assert!(store.register_peer_subscriber(&peer_id, new_generation, &current));
         assert!(current.is_open());
+    }
+
+    #[test]
+    fn rebind_cannot_cross_validated_subscription_registration() {
+        use core_meta_herdr_nexus::CoreSet;
+        use shared_translator::{GroupId, PeerBinding, PeerId, PeerIdentity, ProcessId, UserId};
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::time::Duration;
+
+        let store = Arc::new(ConfigurationStore::default());
+        let peer_id = PeerId("stable".into());
+        let identity = PeerIdentity {
+            user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
+            process_id: ProcessId(i64::from(std::process::id())),
+        };
+        let binding = PeerBinding {
+            peer_id: peer_id.clone(),
+            peer_identity: identity.clone(),
+        };
+        assert!(matches!(
+            store.configure(CoreSet::Peer(binding.clone()), || Ok(())),
+            core_meta_herdr_nexus::Response::Configured(_)
+        ));
+        let caller = herdr_nexus_wire::transport_types::Caller {
+            user_id: identity.user_id,
+            group_id: GroupId(i64::from(nix::unistd::getgid().as_raw())),
+            process_id: identity.process_id,
+        };
+        let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
+        let stale = Arc::new(SubscriberQueue::new(1));
+        let validated = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+
+        let registration = {
+            let store = Arc::clone(&store);
+            let peer_id = peer_id.clone();
+            let stale = Arc::clone(&stale);
+            let validated = Arc::clone(&validated);
+            let release = Arc::clone(&release);
+            std::thread::spawn(move || {
+                store.register_peer_subscriber_after_validation(
+                    &peer_id,
+                    old_generation,
+                    &stale,
+                    || {
+                        validated.wait();
+                        release.wait();
+                    },
+                )
+            })
+        };
+        validated.wait();
+
+        let (rebound, observed) = mpsc::channel();
+        let rebinding = {
+            let store = Arc::clone(&store);
+            std::thread::spawn(move || {
+                let response = store.configure(CoreSet::Peer(binding), || Ok(()));
+                rebound.send(response).expect("report rebind");
+            })
+        };
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "rebind must wait while validated registration holds the peer transaction"
+        );
+        release.wait();
+        assert!(registration.join().expect("registration thread"));
+        assert!(matches!(
+            observed.recv_timeout(Duration::from_secs(1)).expect("rebind completed"),
+            core_meta_herdr_nexus::Response::Configured(_)
+        ));
+        rebinding.join().expect("rebind thread");
+        assert!(!stale.is_open(), "rebind closes the just-registered old generation");
+
+        let (_, new_generation) = store.peer_for(&caller).expect("replacement binding admitted");
+        let current = Arc::new(SubscriberQueue::new(1));
+        assert!(store.register_peer_subscriber(&peer_id, new_generation, &current));
+        assert!(current.is_open(), "the current generation remains subscribed");
     }
 
     #[test]
