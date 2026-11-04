@@ -64,3 +64,20 @@ The changes followed a real Prompt through the public Nexus. Public Close
 returned `Closed.Done`, the final List was empty, and cleanup stopped and
 deleted the owned session, processes, and temporary directories. Lock 25037
 was released with a typed `Released` reply.
+
+The shared session poll and disappearance repair was rebuilt as
+`/nix/store/fwv0anqszslscqdb3bpwhcp46axnrdw7-herdr-nexus-v1`. Two live CLI
+subscribers received `Subscribed.Done`. Closing the owned pane directly at the
+herdr boundary then produced exactly one identical event on each stream:
+
+```text
+Changed.{ { deadaf8fe3 w1:p1 }
+          Dead }
+```
+
+Both streams remained empty across repeated complete snapshots, witnessing no
+duplicate death event. The remote suite separately proves that uncertain and
+refused polls preserve the previous state, reappearance emits the verified
+state, and two subscribers cause six shared source polls rather than twelve.
+Cleanup stopped and deleted the owned `deadaf8fe3` session and temporary
+resources; lock 25042 was released with a typed `Released` reply.
