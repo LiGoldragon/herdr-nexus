@@ -49,3 +49,6 @@ struct Output{status:std::process::ExitStatus,stdout:Vec<u8>,stderr:Vec<u8>}
 enum RunError{Io(std::io::Error),Timeout}
 fn run_command(program:&str,args:&[String],timeout:Duration)->Result<Output,RunError>{let mut child=Command::new(program).args(args).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(RunError::Io)?; let mut out=child.stdout.take().unwrap(); let mut err=child.stderr.take().unwrap(); let a=thread::spawn(move||{let mut b=Vec::new();let _=out.read_to_end(&mut b);b}); let b=thread::spawn(move||{let mut b=Vec::new();let _=err.read_to_end(&mut b);b}); let start=Instant::now(); loop{if let Some(status)=child.try_wait().map_err(RunError::Io)?{return Ok(Output{status,stdout:a.join().unwrap_or_default(),stderr:b.join().unwrap_or_default()})} if start.elapsed()>=timeout{let _=child.kill();let _=child.wait();return Err(RunError::Timeout)} thread::sleep(Duration::from_millis(5));}}
 #[derive(Debug)]pub enum ServerError{Io(std::io::Error),Frame(shared_translator::FrameError),Signal(String)}
+
+impl std::fmt::Display for ServerError { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{self:?}") } }
+impl std::error::Error for ServerError {}

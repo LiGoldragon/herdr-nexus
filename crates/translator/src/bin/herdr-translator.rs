@@ -1,4 +1,4 @@
-use std::io::{self, Read};
+use std::io;
 use herdr_nexus_translator::server;
 use shared_translator::{FrameCapacity, FrameReading, Restorable, Signal};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
