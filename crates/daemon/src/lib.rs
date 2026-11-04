@@ -291,6 +291,12 @@ struct SubscriberQueueState {
     closed: bool,
 }
 
+enum QueueNext {
+    Response(signal_herdr_nexus::Response),
+    Quiet,
+    Closed,
+}
+
 impl SubscriberQueue {
     fn new(capacity: usize) -> Self {
         Self {
@@ -316,15 +322,22 @@ impl SubscriberQueue {
         true
     }
 
-    fn next(&self) -> Option<signal_herdr_nexus::Response> {
+    fn next_for(&self, wait: Duration) -> QueueNext {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        while state.pending.is_empty() && !state.closed {
-            state = self.ready.wait(state).unwrap_or_else(|p| p.into_inner());
+        if state.pending.is_empty() && !state.closed {
+            let (next, result) = self
+                .ready
+                .wait_timeout(state, wait)
+                .unwrap_or_else(|p| p.into_inner());
+            state = next;
+            if result.timed_out() && state.pending.is_empty() && !state.closed {
+                return QueueNext::Quiet;
+            }
         }
         if state.closed {
-            None
+            QueueNext::Closed
         } else {
-            state.pending.pop_front()
+            QueueNext::Response(state.pending.pop_front().expect("nonempty subscriber queue"))
         }
     }
 
@@ -655,15 +668,28 @@ impl Dispatcher {
         self.configuration.register_subscriber(&queue);
         let writer_queue = Arc::clone(&queue);
         let writer_configuration = Arc::clone(&self.configuration);
-        std::thread::spawn(move || {
-            while let Some(response) = writer_queue.next() {
-                let Some(configuration) = writer_configuration.snapshot() else {
-                    writer_queue.close();
-                    return;
-                };
-                if write_subscription_change(&stream, &configuration, &response).is_err() {
-                    writer_queue.close();
-                    return;
+        std::thread::spawn(move || loop {
+            let Some(configuration) = writer_configuration.snapshot() else {
+                writer_queue.close();
+                return;
+            };
+            match writer_queue.next_for(configuration.polling) {
+                QueueNext::Closed => return,
+                QueueNext::Quiet => {
+                    if subscription_peer_closed(&stream) {
+                        writer_queue.close();
+                        return;
+                    }
+                }
+                QueueNext::Response(response) => {
+                    let Some(configuration) = writer_configuration.snapshot() else {
+                        writer_queue.close();
+                        return;
+                    };
+                    if write_subscription_change(&stream, &configuration, &response).is_err() {
+                        writer_queue.close();
+                        return;
+                    }
                 }
             }
         });
@@ -734,14 +760,20 @@ impl Dispatcher {
                 }
             }
             let response = self.dispatch(Query::List(session.clone()), Arc::clone(&configuration));
-            let complete = match response {
-                Response::Listed(Outcome::Listed(known)) => Some(
+            let complete = matches!(response, Response::Listed(Outcome::Listed(_)));
+            // Hold Memory stable through publication. Close uses the same
+            // state-before-hub order, so an older poll can never reopen a
+            // pane after its terminal Dead event.
+            let state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let current = if complete {
+                state.core.owned_in_session(&session).ok().map(|known| {
                     known
                         .into_iter()
                         .map(|known| (known.pane, known.state))
-                        .collect::<std::collections::HashMap<_, _>>(),
-                ),
-                _ => None,
+                        .collect::<std::collections::HashMap<_, _>>()
+                })
+            } else {
+                None
             };
             let mut hub = self
                 .subscriptions
@@ -753,7 +785,7 @@ impl Dispatcher {
             if subscription.generation != generation {
                 return;
             }
-            if let Some(current) = complete {
+            if let Some(current) = current {
                 subscription.subscribers.retain_mut(|subscriber| {
                     let changes = current
                         .iter()
@@ -778,6 +810,8 @@ impl Dispatcher {
                 hub.sessions.remove(&session);
                 return;
             }
+            drop(hub);
+            drop(state);
         }
     }
 
@@ -942,6 +976,21 @@ fn write_subscription_change(
         signal::FrameCapacity::from(configuration.frame_capacity_bytes),
     )?;
     Ok(())
+}
+
+fn subscription_peer_closed(stream: &std::os::unix::net::UnixStream) -> bool {
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use std::os::fd::AsFd;
+    let mut descriptors = [PollFd::new(
+        stream.as_fd(),
+        PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL,
+    )];
+    match poll(&mut descriptors, PollTimeout::ZERO) {
+        Ok(_) => descriptors[0].revents().is_some_and(|events| {
+            events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
+        }),
+        Err(_) => true,
+    }
 }
 
 fn done_result(outcome: EmissionResult) -> herdr_nexus_core::ExternalResult<()> {
@@ -1705,6 +1754,21 @@ mod tests {
             (1..=5).contains(&polls),
             "one shared source should poll at one cadence, got {polls}"
         );
+    }
+
+    #[test]
+    fn quiet_disconnected_subscriber_releases_its_shared_poll_source() {
+        let (dispatcher, _emitter, pane) = started_dispatcher(Vec::new());
+        let (server, client) = std::os::unix::net::UnixStream::pair().expect("pair");
+        dispatcher
+            .subscribe(server, pane.session.clone(), test_configuration())
+            .expect("subscribe");
+        drop(client);
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        while dispatcher.subscription_source_count() != 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(dispatcher.subscription_source_count(), 0);
     }
 
     #[test]

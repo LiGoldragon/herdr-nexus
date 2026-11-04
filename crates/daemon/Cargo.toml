@@ -14,7 +14,7 @@ signal-herdr-nexus.workspace = true
 meta-signal-herdr-nexus.workspace = true
 signal = { workspace = true, features = ["transport"] }
 shared-translator.workspace = true
-nix = { version = "0.30", features = ["fs", "user"] }
+nix = { version = "0.30", features = ["fs", "poll", "user"] }
 
 [lints.rust]
 unsafe_code = "forbid"
