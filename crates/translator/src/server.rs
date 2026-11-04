@@ -33,6 +33,7 @@ pub fn run(
         .map_err(|message| ServerError::Signal(message.into()))?;
     let bootstrap_budget = validated_budget(&bootstrap.budget_value)
         .ok_or_else(|| ServerError::Signal("invalid bootstrap text budget".into()))?;
+    let bootstrap_meta = BootstrapMeta { admission, text_budget: bootstrap_budget };
     let names = herdr_nexus_wire::socket_names();
     let public =
         OwnedSocket::bind(Path::new(&place.directory.0).join(names.public_translator_socket.0))?;
@@ -49,8 +50,7 @@ pub fn run(
             meta_configuration,
             meta_place,
             Endpoint::Meta,
-            admission,
-            bootstrap_budget,
+            bootstrap_meta,
             meta_peer,
         )
     });
@@ -59,8 +59,7 @@ pub fn run(
         configuration,
         place.clone(),
         Endpoint::Public,
-        admission,
-        bootstrap_budget,
+        bootstrap_meta,
         nexus_peer,
     );
     Ok(())
@@ -71,8 +70,7 @@ fn serve_listener(
     configuration: std::sync::Arc<TranslatorConfiguration>,
     place: Place,
     endpoint: Endpoint,
-    admission: herdr_nexus_wire::ValidAdmission,
-    bootstrap_budget: (usize, usize),
+    bootstrap: BootstrapMeta,
     nexus_peer: herdr_nexus_wire::transport_types::PeerIdentity,
 ) {
     for stream in bound.listener.incoming() {
@@ -86,8 +84,7 @@ fn serve_listener(
                 &configuration,
                 &place,
                 endpoint,
-                admission,
-                bootstrap_budget,
+                bootstrap,
                 Some(&nexus_peer),
             ) {
                 eprintln!("herdr translator request failed: {error}");
@@ -104,13 +101,13 @@ pub fn serve_one(
     admission: herdr_nexus_wire::ValidAdmission,
     bootstrap_budget: (usize, usize),
 ) -> Result<(), ServerError> {
+    let bootstrap = BootstrapMeta { admission, text_budget: bootstrap_budget };
     serve_one_paired(
         stream,
         configuration,
         place,
         endpoint,
-        admission,
-        bootstrap_budget,
+        bootstrap,
         None,
     )
 }
@@ -120,8 +117,7 @@ fn serve_one_paired(
     configuration: &TranslatorConfiguration,
     place: &Place,
     endpoint: Endpoint,
-    admission: herdr_nexus_wire::ValidAdmission,
-    bootstrap_budget: (usize, usize),
+    bootstrap: BootstrapMeta,
     nexus_peer: Option<&herdr_nexus_wire::transport_types::PeerIdentity>,
 ) -> Result<(), ServerError> {
     use crate::transport::{self, Frame};
@@ -129,11 +125,11 @@ fn serve_one_paired(
     let caller = crate::transport::peer_caller(stream).map_err(ServerError::Transport)?;
     let mut io = herdr_nexus_wire::deadline::DeadlineStream::new(
         stream.try_clone().map_err(ServerError::Io)?,
-        admission.deadline,
+        bootstrap.admission.deadline,
     )
     .map_err(ServerError::Io)?;
     let request =
-        transport::read_frame(&mut io, admission.frame_capacity).map_err(ServerError::Transport)?;
+        transport::read_frame(&mut io, bootstrap.admission.frame_capacity).map_err(ServerError::Transport)?;
     if request.kind != Kind::Request {
         return Err(ServerError::Transport(
             crate::transport::TransportError::InvalidLength,
@@ -149,7 +145,7 @@ fn serve_one_paired(
             &mut io,
             lane,
             "lane is unavailable on this endpoint",
-            admission.frame_capacity,
+            bootstrap.admission.frame_capacity,
         );
     }
     if caller.user_id.0 != i64::from(nix::unistd::getuid().as_raw()) {
@@ -157,7 +153,7 @@ fn serve_one_paired(
             &mut io,
             lane,
             "caller is outside the bound login",
-            admission.frame_capacity,
+            bootstrap.admission.frame_capacity,
         );
     }
     if request.lane == Lane::EmissionSignal
@@ -169,18 +165,20 @@ fn serve_one_paired(
             &mut io,
             lane,
             "caller is not the paired Nexus",
-            admission.frame_capacity,
+            bootstrap.admission.frame_capacity,
         );
     }
     if request.lane == Lane::PublicText {
-        let Some((mut budget, timeout)) = configuration.text_context() else {
+        let Some(ready) = configuration.ready() else {
             return write_failed_frame(
                 &mut io,
                 lane,
                 "translator is awaiting settings",
-                admission.frame_capacity,
+                bootstrap.admission.frame_capacity,
             );
         };
+        let mut budget = ready.text_budget();
+        let timeout = ready.call_timeout;
         let query = (|| -> Result<_, ServerError> {
             let text = request.text().map_err(ServerError::Transport)?;
             decode_public(text, &mut budget)
@@ -192,7 +190,7 @@ fn serve_one_paired(
                 let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
                     stream.try_clone().map_err(ServerError::Io)?, timeout,
                 ).map_err(ServerError::Io)?;
-                return write_failed_frame(&mut output, lane, &error.to_string(), admission.frame_capacity);
+                return write_failed_frame(&mut output, lane, &error.to_string(), bootstrap.admission.frame_capacity);
             }
         };
         if matches!(query, signal_herdr_nexus::Query::Subscribe(_)) {
@@ -203,7 +201,7 @@ fn serve_one_paired(
                 place,
                 caller,
                 query,
-                admission.frame_capacity,
+                bootstrap.admission.frame_capacity,
             );
         }
         let response = match forward_public(place, caller, query, timeout) {
@@ -222,7 +220,7 @@ fn serve_one_paired(
         let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
             stream.try_clone().map_err(ServerError::Io)?, timeout,
         ).map_err(ServerError::Io)?;
-        return transport::write_frame(&mut output, &response, admission.frame_capacity)
+        return transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
             .map_err(ServerError::Transport);
     }
     let response = (|| -> Result<Frame, ServerError> {
@@ -231,13 +229,13 @@ fn serve_one_paired(
                 let query = Signal::<emission_herdr_nexus::Query>::from(request.payload)
                     .restore()
                     .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
-                let Some(runtime) = configuration.runtime() else {
+                let Some(ready) = configuration.ready() else {
                     return Err(ServerError::Signal(
                         "translator is awaiting settings".into(),
                     ));
                 };
                 let emission_herdr_nexus::Query::Emit(herdr) = query;
-                let response = emission_herdr_nexus::Response::Emitted(execute(&runtime, &herdr))
+                let response = emission_herdr_nexus::Response::Emitted(execute(&ready.runtime(), &herdr))
                     .signalize()
                     .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
                 Frame {
@@ -253,8 +251,7 @@ fn serve_one_paired(
                     place,
                     caller.clone(),
                     text,
-                    bootstrap_budget,
-                    admission.deadline,
+                    bootstrap,
                 )?;
                 Frame {
                     lane: Lane::MetaText,
@@ -276,11 +273,14 @@ fn serve_one_paired(
         },
     };
     drop(io);
-    let response_timeout = configuration.call_timeout().unwrap_or(admission.deadline);
+    let response_timeout = match configuration.ready() {
+        Some(ready) => ready.call_timeout,
+        None => bootstrap.admission.deadline,
+    };
     let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
         stream.try_clone().map_err(ServerError::Io)?, response_timeout,
     ).map_err(ServerError::Io)?;
-    transport::write_frame(&mut output, &response, admission.frame_capacity)
+    transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
         .map_err(ServerError::Transport)
 }
 
@@ -315,33 +315,43 @@ struct PartialTranslatorConfiguration {
     text_budget: Option<(usize, usize)>,
 }
 
-impl TranslatorConfiguration {
-    fn call_timeout(&self) -> Option<Duration> {
-        self.partial.read().ok()?.call_timeout
-    }
-    fn runtime(&self) -> Option<Runtime> {
-        let partial = self.partial.read().ok()?.clone();
-        Runtime::new(
-            partial.executable?,
-            partial.call_timeout?,
-            partial.output_limit?,
-        )
-        .filter(|_| partial.text_budget.is_some())
+#[derive(Clone, Copy)]
+struct BootstrapMeta {
+    admission: herdr_nexus_wire::ValidAdmission,
+    text_budget: (usize, usize),
+}
+
+#[derive(Clone)]
+struct ReadyTranslatorConfiguration {
+    executable: PathBuf,
+    call_timeout: Duration,
+    output_limit: usize,
+    text_budget: (usize, usize),
+}
+
+impl ReadyTranslatorConfiguration {
+    fn runtime(&self) -> Runtime {
+        Runtime::new(self.executable.clone(), self.call_timeout, self.output_limit)
+            .expect("ready translator configuration was validated before publication")
     }
 
     #[cfg(feature = "text")]
-    fn text_context(&self) -> Option<(datom_codec::Budget, Duration)> {
+    fn text_budget(&self) -> datom_codec::Budget {
+        budget(self.text_budget)
+    }
+}
+
+impl TranslatorConfiguration {
+    fn ready(&self) -> Option<ReadyTranslatorConfiguration> {
         let partial = self.partial.read().ok()?.clone();
-        let (nodes, depth) = partial.text_budget?;
-        Some((
-            datom_codec::Budget {
-                remaining: i64::try_from(nodes).ok()?,
-                reader: protos::ReaderBudget { remaining: nodes },
-                depth: 0,
-                maximum_depth: i64::try_from(depth).ok()?,
-            },
-            partial.call_timeout?,
-        ))
+        let ready = ReadyTranslatorConfiguration {
+            executable: partial.executable?,
+            call_timeout: partial.call_timeout?,
+            output_limit: partial.output_limit?,
+            text_budget: partial.text_budget?,
+        };
+        Runtime::new(ready.executable.clone(), ready.call_timeout, ready.output_limit)?;
+        Some(ready)
     }
 
     fn apply(&self, setting: meta_signal_herdr_nexus::Set) -> meta_signal_herdr_nexus::Response {
@@ -434,11 +444,10 @@ fn configure_text(
     place: &Place,
     caller: crate::transport_types::Caller,
     text: &str,
-    bootstrap_limits: (usize, usize),
-    bootstrap_timeout: Duration,
+    bootstrap: BootstrapMeta,
 ) -> Result<String, ServerError> {
     use datom_codec::{Actualizing, Potential};
-    let mut budget = budget(bootstrap_limits);
+    let mut budget = budget(bootstrap.text_budget);
     let mut potential = Potential::<meta_signal_herdr_nexus::Query>::from(text);
     let query = potential
         .actualize(&mut budget)
@@ -450,7 +459,10 @@ fn configure_text(
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
         setting => {
-            let timeout = configuration.call_timeout().unwrap_or(bootstrap_timeout);
+            let timeout = match configuration.ready() {
+                Some(ready) => ready.call_timeout,
+                None => bootstrap.admission.deadline,
+            };
             forward_meta(place, caller, core_setting(setting), timeout)?
         }
     };
@@ -551,8 +563,9 @@ fn forward_public_stream(
     let core = UnixStream::connect(Path::new(&place.directory.0).join("herdr.sock"))
         .map_err(ServerError::Io)?;
     let timeout = configuration
-        .call_timeout()
-        .ok_or_else(|| ServerError::Signal("translator is awaiting CallTimeout".into()))?;
+        .ready()
+        .ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?
+        .call_timeout;
     let mut core_write = herdr_nexus_wire::deadline::DeadlineStream::new(
         core.try_clone().map_err(ServerError::Io)?,
         timeout,
@@ -566,8 +579,9 @@ fn forward_public_stream(
         .map_err(ServerError::Frame)?;
     loop {
         let timeout = configuration
-            .call_timeout()
-            .ok_or_else(|| ServerError::Signal("translator is awaiting CallTimeout".into()))?;
+            .ready()
+            .ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?
+            .call_timeout;
         let Some(body) = read_subscription_signal_frame(
             core.try_clone().map_err(ServerError::Io)?,
             timeout,
@@ -1433,11 +1447,13 @@ mod tests {
             &TranslatorConfiguration::default(),
             &place,
             Endpoint::Public,
-            herdr_nexus_wire::ValidAdmission {
-                deadline: Duration::from_secs(1),
-                frame_capacity: MAXIMUM_SIGNAL_BYTES,
+            BootstrapMeta {
+                admission: herdr_nexus_wire::ValidAdmission {
+                    deadline: Duration::from_secs(1),
+                    frame_capacity: MAXIMUM_SIGNAL_BYTES,
+                },
+                text_budget: (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
             },
-            (MAXIMUM_SIGNAL_BYTES, signal::MAXIMUM_SIGNAL_DEPTH),
             Some(&expected),
         )
         .expect("impostor receives typed failure");

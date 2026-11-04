@@ -110,7 +110,7 @@ impl Bootstrap {
         })
     }
 
-    pub fn snapshot(&self) -> Option<Arc<RuntimeConfiguration>> {
+    pub fn snapshot(&self) -> Option<Arc<ReadyCoreConfiguration>> {
         self.store.snapshot()
     }
 
@@ -248,7 +248,7 @@ pub struct Dispatcher {
 pub trait ExternalEmitter: Send + Sync {
     fn emit(
         &self,
-        configuration: &RuntimeConfiguration,
+        configuration: &ReadyCoreConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult;
 }
@@ -422,7 +422,7 @@ impl Dispatcher {
     fn with_emitter(paths: &SocketPaths, emitter: Arc<dyn ExternalEmitter>) -> Self {
         let configuration = Arc::new(ConfigurationStore::default());
         *configuration.current.write().expect("configuration") =
-            Some(Arc::new(RuntimeConfiguration {
+            Some(Arc::new(ReadyCoreConfiguration {
                 polling: Duration::from_millis(10),
                 start_timeout: Duration::from_millis(20),
                 frame_capacity_bytes: 4096,
@@ -444,7 +444,7 @@ impl Dispatcher {
     pub fn dispatch(
         &self,
         query: signal_herdr_nexus::Query,
-        configuration: Arc<RuntimeConfiguration>,
+        configuration: Arc<ReadyCoreConfiguration>,
     ) -> signal_herdr_nexus::Response {
         use emission_herdr_nexus::{
             AgentPrompt_Data, AgentStart_Data, Herdr, Keys_Data, Verb, WorkspaceCreate_Data,
@@ -652,7 +652,7 @@ impl Dispatcher {
         self: &Arc<Self>,
         stream: std::os::unix::net::UnixStream,
         session: signal_herdr_nexus::Session,
-        configuration: Arc<RuntimeConfiguration>,
+        configuration: Arc<ReadyCoreConfiguration>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use signal_herdr_nexus::{Changed_Data, Response};
         let (acknowledgement, current) = {
@@ -843,7 +843,7 @@ impl Dispatcher {
 
     fn execute(
         &self,
-        configuration: &RuntimeConfiguration,
+        configuration: &ReadyCoreConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult {
         self.emitter.emit(configuration, herdr)
@@ -877,7 +877,7 @@ impl Dispatcher {
 impl ExternalEmitter for SocketEmitter {
     fn emit(
         &self,
-        _configuration: &RuntimeConfiguration,
+        _configuration: &ReadyCoreConfiguration,
         herdr: emission_herdr_nexus::Herdr,
     ) -> EmissionResult {
         use herdr_nexus_wire::transport_types::{Kind, Lane};
@@ -980,7 +980,7 @@ fn unavailable_transport(path: &std::path::Path, message: String) -> EmissionRes
 
 fn write_subscription_change(
     stream: &std::os::unix::net::UnixStream,
-    configuration: &RuntimeConfiguration,
+    configuration: &ReadyCoreConfiguration,
     change: &signal_herdr_nexus::Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use signal::{FrameWriting, Signalizable};
@@ -1146,7 +1146,7 @@ fn join_listings(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RuntimeConfiguration {
+pub struct ReadyCoreConfiguration {
     pub polling: Duration,
     pub start_timeout: Duration,
     pub frame_capacity_bytes: usize,
@@ -1166,7 +1166,7 @@ struct PartialConfiguration {
 #[derive(Default)]
 pub struct ConfigurationStore {
     partial: RwLock<PartialConfiguration>,
-    current: RwLock<Option<Arc<RuntimeConfiguration>>>,
+    current: RwLock<Option<Arc<ReadyCoreConfiguration>>>,
     subscriber_queues: std::sync::Mutex<Vec<std::sync::Weak<SubscriberQueue>>>,
 }
 
@@ -1254,7 +1254,7 @@ impl ConfigurationStore {
                 Some(frame_capacity_bytes),
                 Some(transport_timeout),
                 Some(subscriber_capacity),
-            ) => Some(RuntimeConfiguration {
+            ) => Some(ReadyCoreConfiguration {
                 polling: *polling,
                 start_timeout: *start_timeout,
                 frame_capacity_bytes: *frame_capacity_bytes,
@@ -1285,7 +1285,7 @@ impl ConfigurationStore {
         })
     }
 
-    pub fn snapshot(&self) -> Option<Arc<RuntimeConfiguration>> {
+    pub fn snapshot(&self) -> Option<Arc<ReadyCoreConfiguration>> {
         self.current
             .read()
             .unwrap_or_else(|p| p.into_inner())
@@ -1358,7 +1358,7 @@ mod tests {
     impl ExternalEmitter for CountingEmitter {
         fn emit(
             &self,
-            _configuration: &RuntimeConfiguration,
+            _configuration: &ReadyCoreConfiguration,
             _herdr: emission_herdr_nexus::Herdr,
         ) -> EmissionResult {
             self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1375,8 +1375,8 @@ mod tests {
         }
     }
 
-    fn test_configuration() -> Arc<RuntimeConfiguration> {
-        Arc::new(RuntimeConfiguration {
+    fn test_configuration() -> Arc<ReadyCoreConfiguration> {
+        Arc::new(ReadyCoreConfiguration {
             polling: Duration::from_millis(10),
             start_timeout: Duration::from_millis(20),
             frame_capacity_bytes: 4096,
@@ -1484,7 +1484,7 @@ mod tests {
     impl ExternalEmitter for StaleListEmitter {
         fn emit(
             &self,
-            _configuration: &RuntimeConfiguration,
+            _configuration: &ReadyCoreConfiguration,
             herdr: emission_herdr_nexus::Herdr,
         ) -> EmissionResult {
             use emission_herdr_nexus::{ExternalOutcome, Verb};
@@ -1609,7 +1609,7 @@ mod tests {
     impl ExternalEmitter for SubscriptionEmitter {
         fn emit(
             &self,
-            configuration: &RuntimeConfiguration,
+            configuration: &ReadyCoreConfiguration,
             herdr: emission_herdr_nexus::Herdr,
         ) -> EmissionResult {
             use emission_herdr_nexus::{ExternalOutcome, Verb};
@@ -1797,7 +1797,7 @@ mod tests {
             ExternalOutcome::Agents(vec![agent_listing(&pane, signal_herdr_nexus::State::Idle)]),
             ExternalOutcome::Agents(vec![agent_listing(&pane, signal_herdr_nexus::State::Busy)]),
         ]);
-        let slow = Arc::new(RuntimeConfiguration {
+        let slow = Arc::new(ReadyCoreConfiguration {
             polling: Duration::from_millis(100),
             start_timeout: Duration::from_millis(20),
             frame_capacity_bytes: 4096,
@@ -1842,7 +1842,7 @@ mod tests {
         while emitter.list_count.load(std::sync::atomic::Ordering::SeqCst) < 1 {
             std::thread::sleep(Duration::from_millis(2));
         }
-        let replacement = Arc::new(RuntimeConfiguration {
+        let replacement = Arc::new(ReadyCoreConfiguration {
             polling: Duration::from_millis(10),
             start_timeout: Duration::from_millis(25),
             frame_capacity_bytes: 4096,
