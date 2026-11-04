@@ -88,7 +88,7 @@
           } (builtins.readFile ./checks/generated-contract.sh);
           emission-generated = pkgs.runCommand "herdr-emission-generated" {
             generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/emission.ethos;
+            declaration = ./crates/emission/ethos/emission.ethos;
             committed = ./crates/emission/src/generated/emission.rs;
           } (builtins.readFile ./checks/generated-contract.sh);
           argument-generated = pkgs.runCommand "herdr-argument-generated" {
@@ -126,7 +126,7 @@
           } (builtins.readFile ./checks/generated-contract.sh);
           core-meta-generated = pkgs.runCommand "herdr-core-meta-generated" {
             generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/core-meta.ethos;
+            declaration = ./crates/core-meta/ethos/core-meta.ethos;
             committed = ./crates/core-meta/src/lib.rs;
             normalization = "core-meta";
           } (builtins.readFile ./checks/generated-contract-normalized.sh);

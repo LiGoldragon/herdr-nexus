@@ -33,7 +33,7 @@ use crate::meta_payload;' "$generated"
   core-meta)
     cat >> "$generated" <<'EOF'
 /// The generated internal meta contract source.
-pub const ETHOS: &str = include_str!("../../../ethos/core-meta.ethos");
+pub const ETHOS: &str = include_str!("../ethos/core-meta.ethos");
 
 impl signal::Contracted for Query {
     const CONTRACT_SOURCE: &'static str = ETHOS;

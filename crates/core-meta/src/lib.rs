@@ -37,7 +37,7 @@ pub enum Response {
     ConfigureRefused(meta_signal_herdr_nexus::ConfigurationRefusal),
 }
 /// The generated internal meta contract source.
-pub const ETHOS: &str = include_str!("../../../ethos/core-meta.ethos");
+pub const ETHOS: &str = include_str!("../ethos/core-meta.ethos");
 
 impl signal::Contracted for Query {
     const CONTRACT_SOURCE: &'static str = ETHOS;
