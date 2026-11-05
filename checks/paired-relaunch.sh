@@ -29,11 +29,11 @@ start_pair() {
   child_pids=()
   for _ in $(seq 1 100); do
     read -r -a child_pids <<<"$(cat "/proc/$pair_pid/task/$pair_pid/children" 2>/dev/null || true)"
-    [[ ${#child_pids[@]} -eq 2 && -S $directory/herdr-meta-translator.sock ]] && break
+    [[ ${#child_pids[@]} -eq 2 && -S $directory/herdr-nexus-meta-translator.sock ]] && break
     sleep .05
   done
   [[ ${#child_pids[@]} -eq 2 ]]
-  [[ -S $directory/herdr-meta-translator.sock ]]
+  [[ -S $directory/herdr-nexus-meta-translator.sock ]]
   "$package/bin/herdr-nexus-meta" one 'Configure.Polling.100' \
     | grep -q Configured
 }
