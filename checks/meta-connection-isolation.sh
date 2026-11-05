@@ -23,17 +23,17 @@ place="{ one $directory $state }"
 "$package/bin/herdr-pair" "$place" >"$base/pair.log" 2>&1 &
 pair_pid=$!
 for _ in $(seq 1 200); do
-  [[ -S $directory/herdr-meta.sock && -S $directory/herdr-meta-translator.sock ]] && break
+  [[ -S $directory/herdr-nexus-meta.sock && -S $directory/herdr-nexus-meta-translator.sock ]] && break
   sleep .02
 done
-if [[ ! -S $directory/herdr-meta.sock || ! -S $directory/herdr-meta-translator.sock ]]; then
+if [[ ! -S $directory/herdr-nexus-meta.sock || ! -S $directory/herdr-nexus-meta-translator.sock ]]; then
   cat "$base/pair.log" >&2
   exit 1
 fi
 
 # A client which is not the captured translator is one failed connection, not
 # a failed privileged listener or pair.
-python3 - "$directory/herdr-meta.sock" <<'PY'
+python3 - "$directory/herdr-nexus-meta.sock" <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
@@ -44,7 +44,7 @@ PY
 
 # The text front likewise bounds malformed and partially-progressed frames to
 # their own connections.  The partial body exceeds the deployment progress bound.
-python3 - "$directory/herdr-meta-translator.sock" <<'PY'
+python3 - "$directory/herdr-nexus-meta-translator.sock" <<'PY'
 import socket, sys
 s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])
@@ -53,7 +53,7 @@ s.close()
 PY
 "$package/bin/herdr-nexus-meta" one 'Configure.StartTimeout.1000' \
   | grep -q Configured
-python3 - "$directory/herdr-meta-translator.sock" <<'PY'
+python3 - "$directory/herdr-nexus-meta-translator.sock" <<'PY'
 import socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 s.connect(sys.argv[1])

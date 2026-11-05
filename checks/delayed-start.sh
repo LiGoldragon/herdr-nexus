@@ -24,11 +24,11 @@ place="{ one $directory $state }"
 "$package/bin/herdr-pair" "$place" >"$base/pair.log" 2>&1 &
 pair=$!
 for _ in $(seq 1 100); do
-  [[ -S $directory/herdr-meta-translator.sock && -S $directory/herdr-meta.sock ]] && break
+  [[ -S $directory/herdr-nexus-meta-translator.sock && -S $directory/herdr-nexus-meta.sock ]] && break
   sleep .02
 done
-[[ -S $directory/herdr-meta-translator.sock ]]
-[[ -S $directory/herdr-meta.sock ]]
+[[ -S $directory/herdr-nexus-meta-translator.sock ]]
+[[ -S $directory/herdr-nexus-meta.sock ]]
 
 meta="$package/bin/herdr-nexus-meta"
 public="$package/bin/herdr-nexus"

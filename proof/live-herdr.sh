@@ -67,7 +67,7 @@ start_metaflow() {
   "$package/bin/herdr-pair" "{ $name $directory $state }" >"$base/$name-pair.log" 2>&1 &
   pids+=("$!")
   for _ in $(seq 1 100); do
-    [[ -S "$directory/herdr-meta-translator.sock" && -S "$directory/herdr-meta.sock" ]] && return
+    [[ -S "$directory/herdr-nexus-meta-translator.sock" && -S "$directory/herdr-nexus-meta.sock" ]] && return
     sleep .05
   done
   echo "metaflow $name did not bind bootstrap sockets" >&2

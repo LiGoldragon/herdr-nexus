@@ -29,10 +29,10 @@ start_pair() {
   child_pids=()
   for _ in $(seq 1 100); do
     read -r -a child_pids <<<"$(cat "/proc/$pair_pid/task/$pair_pid/children" 2>/dev/null || true)"
-    [[ ${#child_pids[@]} -eq 3 && -S $directory/herdr-meta-translator.sock ]] && break
+    [[ ${#child_pids[@]} -eq 3 && -S $directory/herdr-nexus-meta-translator.sock ]] && break
     sleep .05
   done
-  if [[ ${#child_pids[@]} -ne 3 || ! -S $directory/herdr-meta-translator.sock ]]; then
+  if [[ ${#child_pids[@]} -ne 3 || ! -S $directory/herdr-nexus-meta-translator.sock ]]; then
     cat "$base/$generation.log" >&2
     return 1
   fi

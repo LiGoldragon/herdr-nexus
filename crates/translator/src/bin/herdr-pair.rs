@@ -1,5 +1,5 @@
 use herdr_nexus_translator::backend_pair::{
-    await_backend, bounded_stop, request_backend_stop, restore_child_signal_mask, spawn_backend,
+    await_backend, request_backend_stop, restore_child_signal_mask, spawn_backend,
     AnchoredEnvironment, BackendSockets, OwnedChild, OwnedRuntimeSocket, RuntimeClaim,
     ValidatedDeployment,
 };
@@ -14,6 +14,7 @@ use shared_translator::{PeerIdentity, ProcessId, UserId};
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 struct PairSockets {
     sockets: Vec<(Listener, String, Option<OwnedRuntimeSocket>)>,
@@ -174,20 +175,138 @@ fn integer(value: Option<String>, name: &str) -> Result<i64, Box<dyn std::error:
     value.ok_or_else(|| name.to_owned())?.parse().map_err(Into::into)
 }
 
-fn terminate_nexus(child: &mut OwnedChild, deployment: &ValidatedDeployment) {
-    let _ = child.signal(rustix::process::Signal::TERM);
-    let deadline = std::time::Instant::now()
-        .checked_add(deployment.stop_timeout)
-        .unwrap_or_else(std::time::Instant::now);
-    if child
-        .wait_until(deadline, deployment.poll_interval)
-        .ok()
-        .flatten()
-        .is_none()
-    {
-        let _ = child.signal(rustix::process::Signal::KILL);
-        let _ = child.child.wait();
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TeardownBudget {
+    grace: Duration,
+    nexus: Duration,
+    global: Duration,
+}
+
+impl TeardownBudget {
+    fn from_total(total: Duration) -> Self {
+        fn fraction(total: Duration, numerator: u128) -> Duration {
+            let nanos = total.as_nanos().saturating_mul(numerator) / 3;
+            Duration::new(
+                u64::try_from(nanos / 1_000_000_000).unwrap_or(u64::MAX),
+                u32::try_from(nanos % 1_000_000_000).expect("subsecond nanoseconds"),
+            )
+        }
+        Self {
+            grace: fraction(total, 1),
+            nexus: fraction(total, 2),
+            global: total,
+        }
     }
+}
+
+#[derive(Clone, Copy)]
+struct TeardownDeadlines {
+    grace: Instant,
+    nexus: Instant,
+    global: Instant,
+}
+
+impl TeardownDeadlines {
+    fn new(start: Instant, total: Duration) -> Result<Self, String> {
+        let budget = TeardownBudget::from_total(total);
+        Ok(Self {
+            grace: start.checked_add(budget.grace).ok_or_else(|| "grace deadline overflow".to_owned())?,
+            nexus: start.checked_add(budget.nexus).ok_or_else(|| "Nexus deadline overflow".to_owned())?,
+            global: start.checked_add(budget.global).ok_or_else(|| "global teardown deadline overflow".to_owned())?,
+        })
+    }
+}
+
+fn remember_first(first: &mut Option<String>, result: Result<(), String>) {
+    if let Err(error) = result {
+        if first.is_none() {
+            *first = Some(error);
+        }
+    }
+}
+
+fn exited(child: &mut OwnedChild, name: &str, first: &mut Option<String>) -> bool {
+    match child.try_wait() {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(error) => {
+            remember_first(first, Err(format!("observe {name}: {error}")));
+            false
+        }
+    }
+}
+
+fn wait_pair_until(
+    core: &mut OwnedChild,
+    translator: Option<&mut OwnedChild>,
+    deadline: Instant,
+    poll: Duration,
+    first: &mut Option<String>,
+) -> (bool, bool) {
+    let mut translator = translator;
+    loop {
+        let core_done = exited(core, "core", first);
+        let translator_done = translator
+            .as_deref_mut()
+            .map(|child| exited(child, "translator", first))
+            .unwrap_or(true);
+        if core_done && translator_done || Instant::now() >= deadline {
+            return (core_done, translator_done);
+        }
+        std::thread::sleep(poll.min(deadline.saturating_duration_since(Instant::now())));
+    }
+}
+
+fn escalation_at(deadline: Instant, poll: Duration) -> Instant {
+    escalation_at_from(Instant::now(), deadline, poll)
+}
+
+fn escalation_at_from(now: Instant, deadline: Instant, poll: Duration) -> Instant {
+    let remaining = deadline.saturating_duration_since(now);
+    deadline.checked_sub(poll.min(remaining)).unwrap_or(deadline)
+}
+
+fn kill_if_live(child: &mut OwnedChild, name: &str, first: &mut Option<String>) {
+    if !exited(child, name, first) {
+        remember_first(first, child.signal(rustix::process::Signal::KILL).map_err(|error| format!("kill {name}: {error}")));
+    }
+}
+
+fn terminate_backend_only(
+    backend: &mut OwnedChild,
+    deployment: &ValidatedDeployment,
+    environment: &AnchoredEnvironment,
+    session: &str,
+    sockets: Option<&BackendSockets>,
+) -> Result<(), String> {
+    let deadlines = TeardownDeadlines::new(Instant::now(), deployment.stop_timeout)?;
+    let mut first = None;
+    let force_at = escalation_at(deadlines.global, deployment.poll_interval);
+    if let Some(sockets) = sockets {
+        remember_first(&mut first, request_backend_stop(deployment, environment, session, sockets, force_at));
+    } else if !exited(backend, "backend", &mut first) {
+        remember_first(
+            &mut first,
+            backend
+                .signal(rustix::process::Signal::TERM)
+                .map_err(|error| format!("terminate backend: {error}")),
+        );
+    }
+    if !exited(backend, "backend", &mut first) {
+        match backend.wait_until(force_at, deployment.poll_interval) {
+            Ok(Some(_)) => {}
+            Ok(None) => kill_if_live(backend, "backend", &mut first),
+            Err(error) => remember_first(&mut first, Err(format!("observe backend stop: {error}"))),
+        }
+    }
+    if !exited(backend, "backend", &mut first) {
+        match backend.wait_until(deadlines.global, deployment.poll_interval) {
+            Ok(Some(_)) => {}
+            Ok(None) => remember_first(&mut first, Err("backend reap unresolved at global teardown deadline".into())),
+            Err(error) => remember_first(&mut first, Err(format!("reap backend: {error}"))),
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 fn terminate_backend(
@@ -197,13 +316,34 @@ fn terminate_backend(
     session: &str,
     sockets: Option<&BackendSockets>,
 ) {
-    if let Some(sockets) = sockets {
-        let _ = request_backend_stop(deployment, environment, session, sockets);
+    if let Err(error) = terminate_backend_only(backend, deployment, environment, session, sockets) {
+        eprintln!("backend teardown failed: {error}");
     }
-    bounded_stop(backend, deployment.stop_timeout, deployment.poll_interval);
+}
+
+fn report_cleanup_after_prior(result: Result<(), String>) {
+    if let Err(error) = result {
+        eprintln!("cleanup after prior failure also failed: {error}");
+    }
+}
+
+fn terminate_core_and_backend(
+    core_publication: &mut Option<herdr_nexus_wire::publication::ParentChannel>,
+    core: &mut OwnedChild,
+    backend: &mut OwnedChild,
+    deployment: &ValidatedDeployment,
+    environment: &AnchoredEnvironment,
+    session: &str,
+    sockets: &BackendSockets,
+) -> Result<(), String> {
+    let deadlines = TeardownDeadlines::new(Instant::now(), deployment.stop_timeout);
+    drop(core_publication.take());
+    terminate_owned(core, None, backend, deployment, environment, session, sockets, deadlines?)
 }
 
 fn terminate_all(
+    core_publication: &mut Option<herdr_nexus_wire::publication::ParentChannel>,
+    translator_publication: &mut Option<herdr_nexus_wire::publication::ParentChannel>,
     core: &mut OwnedChild,
     translator: &mut OwnedChild,
     backend: &mut OwnedChild,
@@ -211,10 +351,124 @@ fn terminate_all(
     environment: &AnchoredEnvironment,
     session: &str,
     sockets: &BackendSockets,
-) {
-    terminate_nexus(core, deployment);
-    terminate_nexus(translator, deployment);
-    terminate_backend(backend, deployment, environment, session, Some(sockets));
+) -> Result<(), String> {
+    let deadlines = TeardownDeadlines::new(Instant::now(), deployment.stop_timeout);
+    // Closing the sole parent endpoints is the graceful stop for a child
+    // blocked before listener acknowledgement. Move them out so no later
+    // path can accidentally keep the publication capability alive.
+    drop(core_publication.take());
+    drop(translator_publication.take());
+    terminate_owned(core, Some(translator), backend, deployment, environment, session, sockets, deadlines?)
+}
+
+fn terminate_owned(
+    core: &mut OwnedChild,
+    mut translator: Option<&mut OwnedChild>,
+    backend: &mut OwnedChild,
+    deployment: &ValidatedDeployment,
+    environment: &AnchoredEnvironment,
+    session: &str,
+    sockets: &BackendSockets,
+    deadlines: TeardownDeadlines,
+) -> Result<(), String> {
+    let mut first = None;
+
+    // Publication channels are already closed. Give both children the same
+    // EOF-unwind window, which is empty when the first third is empty.
+    let (mut core_done, mut translator_done) = wait_pair_until(
+        core,
+        translator.as_deref_mut(),
+        deadlines.grace,
+        deployment.poll_interval,
+        &mut first,
+    );
+
+    // Signal every remaining Nexus before waiting for either one.
+    if !core_done {
+        remember_first(&mut first, core.signal(rustix::process::Signal::TERM).map_err(|error| format!("terminate core: {error}")));
+    }
+    if !translator_done {
+        if let Some(child) = translator.as_deref_mut() {
+            remember_first(&mut first, child.signal(rustix::process::Signal::TERM).map_err(|error| format!("terminate translator: {error}")));
+        }
+    }
+    let force_at = escalation_at(deadlines.nexus, deployment.poll_interval);
+    (core_done, translator_done) = wait_pair_until(
+        core,
+        translator.as_deref_mut(),
+        force_at,
+        deployment.poll_interval,
+        &mut first,
+    );
+    if !core_done {
+        kill_if_live(core, "core", &mut first);
+    }
+    if !translator_done {
+        if let Some(child) = translator.as_deref_mut() {
+            kill_if_live(child, "translator", &mut first);
+        }
+    }
+    (core_done, translator_done) = wait_pair_until(
+        core,
+        translator.as_deref_mut(),
+        deadlines.nexus,
+        deployment.poll_interval,
+        &mut first,
+    );
+
+    // As soon as both Nexuses are reaped, the backend receives the remainder
+    // of the one global budget. If either Nexus runs past D2, keep observing
+    // it without resetting a deadline; orderly backend stop may begin only
+    // after both observations succeed.
+    while !(core_done && translator_done) && Instant::now() < deadlines.global {
+        (core_done, translator_done) = wait_pair_until(
+            core,
+            translator.as_deref_mut(),
+            (Instant::now() + deployment.poll_interval).min(deadlines.global),
+            deployment.poll_interval,
+            &mut first,
+        );
+    }
+    if core_done && translator_done && !exited(backend, "backend", &mut first) {
+        let backend_force_at = escalation_at(deadlines.global, deployment.poll_interval);
+        if Instant::now() < backend_force_at {
+            remember_first(
+                &mut first,
+                request_backend_stop(deployment, environment, session, sockets, backend_force_at),
+            );
+        }
+        match backend.wait_until(backend_force_at, deployment.poll_interval) {
+            Ok(Some(_)) => {}
+            Ok(None) => kill_if_live(backend, "backend", &mut first),
+            Err(error) => remember_first(&mut first, Err(format!("observe backend stop: {error}"))),
+        }
+        if !exited(backend, "backend", &mut first) {
+            match backend.wait_until(deadlines.global, deployment.poll_interval) {
+                Ok(Some(_)) => {}
+                Ok(None) => {}
+                Err(error) => remember_first(&mut first, Err(format!("reap backend: {error}"))),
+            }
+        }
+    }
+
+    // At global expiry cancel every remaining owned child. Final observation
+    // is nonblocking, so D3 is neither reset nor extended.
+    kill_if_live(core, "core", &mut first);
+    if let Some(child) = translator.as_deref_mut() {
+        kill_if_live(child, "translator", &mut first);
+    }
+    kill_if_live(backend, "backend", &mut first);
+    for (child, name) in [(&mut *core, "core"), (&mut *backend, "backend")] {
+        if !exited(child, name, &mut first) {
+            remember_first(&mut first, Err(format!("{name} reap unresolved at global teardown deadline")));
+        }
+    }
+    if let Some(child) = translator.as_deref_mut() {
+        if !exited(child, "translator", &mut first) {
+            remember_first(&mut first, Err("translator reap unresolved at global teardown deadline".into()));
+        }
+    }
+    first.map_or(Ok(()), Err)
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -306,19 +560,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     if !backend_ready {
-        terminate_backend(
+        let teardown = terminate_backend_only(
             &mut backend,
             &deployment,
             &environment,
             &place.metaflow_name.0,
             None,
         );
-        return Ok(());
+        return teardown.map_err(Into::into);
     }
     match stop_requested(&signal_fd) {
         Ok(false) => {}
         stop => {
-            terminate_backend(
+            let teardown = terminate_backend_only(
                 &mut backend,
                 &deployment,
                 &environment,
@@ -326,8 +580,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
             );
             return match stop {
-                Ok(true) => Ok(()),
-                Err(error) => Err(error.into()),
+                Ok(true) => teardown.map_err(Into::into),
+                Err(error) => {
+                    report_cleanup_after_prior(teardown);
+                    Err(error.into())
+                }
                 Ok(false) => unreachable!(),
             };
         }
@@ -359,12 +616,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 return Err(error.into());
             }
         };
+    let mut core_publication = Some(core_publication);
     let mut core_command = Command::new(&core_executable);
     core_command.stdin(Stdio::piped());
     restore_child_signal_mask(&mut core_command, inherited_signal_mask.clone());
     let mut core = match OwnedChild::spawn(&mut core_command, Path::new(&core_executable)) {
         Ok(child) => child,
         Err(error) => {
+            drop(core_child_publication);
+            drop(core_publication.take());
             terminate_backend(&mut backend, &deployment, &environment, &place.metaflow_name.0, Some(&sockets));
             return Err(error.into());
         }
@@ -373,18 +633,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match stop_requested(&signal_fd) {
         Ok(false) => {}
         stop => {
-            terminate_nexus(&mut core, &deployment);
-            terminate_backend(
+            let teardown = terminate_core_and_backend(
+                &mut core_publication,
+                &mut core,
                 &mut backend,
                 &deployment,
                 &environment,
                 &place.metaflow_name.0,
-                Some(&sockets),
+                &sockets,
             );
             pair_sockets.remove_owned();
             return match stop {
-                Ok(true) => Ok(()),
-                Err(error) => Err(error.into()),
+                Ok(true) => teardown.map_err(Into::into),
+                Err(error) => {
+                    report_cleanup_after_prior(teardown);
+                    Err(error.into())
+                }
                 Ok(false) => unreachable!(),
             };
         }
@@ -399,12 +663,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match translator_channels {
             Ok(channels) => channels,
             Err(error) => {
-                terminate_nexus(&mut core, &deployment);
-                terminate_backend(&mut backend, &deployment, &environment, &place.metaflow_name.0, Some(&sockets));
+                report_cleanup_after_prior(terminate_core_and_backend(
+                    &mut core_publication,
+                    &mut core,
+                    &mut backend,
+                    &deployment,
+                    &environment,
+                    &place.metaflow_name.0,
+                    &sockets,
+                ));
                 pair_sockets.remove_owned();
                 return Err(error.into());
             }
         };
+    let mut translator_publication = Some(translator_publication);
     let mut translator_command = Command::new(&translator_executable);
     translator_command.stdin(Stdio::piped());
     environment.apply(&mut translator_command);
@@ -412,8 +684,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut translator = match OwnedChild::spawn(&mut translator_command, Path::new(&translator_executable)) {
         Ok(child) => child,
         Err(error) => {
-            terminate_nexus(&mut core, &deployment);
-            terminate_backend(&mut backend, &deployment, &environment, &place.metaflow_name.0, Some(&sockets));
+            drop(translator_child_publication);
+            drop(translator_publication.take());
+            report_cleanup_after_prior(terminate_core_and_backend(
+                &mut core_publication,
+                &mut core,
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                &sockets,
+            ));
             pair_sockets.remove_owned();
             return Err(error.into());
         }
@@ -422,7 +703,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match stop_requested(&signal_fd) {
         Ok(false) => {}
         stop => {
-            terminate_all(
+            let teardown = terminate_all(
+                &mut core_publication,
+                &mut translator_publication,
                 &mut core,
                 &mut translator,
                 &mut backend,
@@ -433,8 +716,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             pair_sockets.remove_owned();
             return match stop {
-                Ok(true) => Ok(()),
-                Err(error) => Err(error.into()),
+                Ok(true) => teardown.map_err(Into::into),
+                Err(error) => {
+                    report_cleanup_after_prior(teardown);
+                    Err(error.into())
+                }
                 Ok(false) => unreachable!(),
             };
         }
@@ -500,7 +786,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
     })();
     if let Err(error) = bootstrapped {
-        terminate_all(
+        let teardown = terminate_all(
+            &mut core_publication,
+            &mut translator_publication,
             &mut core,
             &mut translator,
             &mut backend,
@@ -511,14 +799,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         pair_sockets.remove_owned();
         if bootstrap_stop {
-            return Ok(());
+            return teardown.map_err(Into::into);
         }
+        report_cleanup_after_prior(teardown);
         return Err(error);
     }
 
     let initial_publications = (|| -> Result<bool, String> {
         if !pair_sockets.accept_publication(
-            &core_publication,
+            core_publication.as_ref().expect("core publication channel"),
             Listener::MetaNexus,
             &mut core,
             &mut translator,
@@ -529,7 +818,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             deployment.poll_interval,
         )? { return Ok(false); }
         if !pair_sockets.accept_publication(
-            &translator_publication,
+            translator_publication.as_ref().expect("translator publication channel"),
             Listener::PublicTranslator,
             &mut core,
             &mut translator,
@@ -540,7 +829,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             deployment.poll_interval,
         )? { return Ok(false); }
         if !pair_sockets.accept_publication(
-            &translator_publication,
+            translator_publication.as_ref().expect("translator publication channel"),
             Listener::MetaTranslator,
             &mut core,
             &mut translator,
@@ -555,7 +844,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let initial_publications = match initial_publications {
         Ok(published) => published,
         Err(error) => {
-            terminate_all(
+            report_cleanup_after_prior(terminate_all(
+                &mut core_publication,
+                &mut translator_publication,
                 &mut core,
                 &mut translator,
                 &mut backend,
@@ -563,13 +854,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &environment,
                 &place.metaflow_name.0,
                 &sockets,
-            );
+            ));
             pair_sockets.remove_owned();
             return Err(error.into());
         }
     };
     if !initial_publications {
-        terminate_all(
+        let teardown = terminate_all(
+            &mut core_publication,
+            &mut translator_publication,
             &mut core,
             &mut translator,
             &mut backend,
@@ -579,16 +872,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &sockets,
         );
         pair_sockets.remove_owned();
-        return Ok(());
+        return teardown.map_err(Into::into);
     }
     match lifetime_start_allowed(&signal_fd) {
         Ok(true) => {}
         allowed => {
-            terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+            let teardown = terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
             pair_sockets.remove_owned();
             return match allowed {
-                Ok(false) => Ok(()),
-                Err(error) => Err(error.into()),
+                Ok(false) => teardown.map_err(Into::into),
+                Err(error) => {
+                    report_cleanup_after_prior(teardown);
+                    Err(error.into())
+                }
                 Ok(true) => unreachable!(),
             };
         }
@@ -596,18 +892,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match stop_requested(&signal_fd) {
             Ok(true) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                let teardown = terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
                 pair_sockets.remove_owned();
-                return Ok(());
+                return teardown.map_err(Into::into);
             }
             Ok(false) => {}
             Err(error) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                 pair_sockets.remove_owned();
                 return Err(error.into());
             }
         }
-        match core_publication.try_receive() {
+        match core_publication.as_ref().expect("core publication channel").try_receive() {
             Ok(Some(publication)) => {
                 let committed = (|| -> Result<bool, String> {
                     if stop_requested(&signal_fd)? { return Ok(false); }
@@ -620,18 +916,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             && backend.try_wait()?.is_none()),
                     )?;
                     if stop_requested(&signal_fd)? { return Ok(false); }
-                    core_publication.acknowledge(Listener::PublicNexus)?;
+                    core_publication.as_ref().expect("core publication channel").acknowledge(Listener::PublicNexus)?;
                     Ok(true)
                 })();
                 match committed {
                     Ok(true) => {}
                     Ok(false) => {
-                        terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                        let teardown = terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
                         pair_sockets.remove_owned();
-                        return Ok(());
+                        return teardown.map_err(Into::into);
                     }
                     Err(error) => {
-                        terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                        report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                         pair_sockets.remove_owned();
                         return Err(error.into());
                     }
@@ -639,20 +935,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Ok(None) => {}
             Err(error) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                 pair_sockets.remove_owned();
                 return Err(error.into());
             }
         }
-        match translator_publication.try_receive() {
+        match translator_publication.as_ref().expect("translator publication channel").try_receive() {
             Ok(Some(_)) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                 pair_sockets.remove_owned();
                 return Err("unexpected duplicate translator listener publication".into());
             }
             Ok(None) => {}
             Err(error) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                 pair_sockets.remove_owned();
                 return Err(error.into());
             }
@@ -663,27 +959,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (core_status, translator_status, backend_status) = match statuses {
             Ok(statuses) => statuses,
             Err(error) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                report_cleanup_after_prior(terminate_all(&mut core_publication, &mut translator_publication, &mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets));
                 pair_sockets.remove_owned();
                 return Err(error.into());
             }
         };
         if core_status.is_some() || translator_status.is_some() || backend_status.is_some() {
-            if core_status.is_none() {
-                terminate_nexus(&mut core, &deployment);
-            }
-            if translator_status.is_none() {
-                terminate_nexus(&mut translator, &deployment);
-            }
-            if backend_status.is_none() {
-                terminate_backend(
-                    &mut backend,
-                    &deployment,
-                    &environment,
-                    &place.metaflow_name.0,
-                    Some(&sockets),
-                );
-            }
+            report_cleanup_after_prior(terminate_all(
+                &mut core_publication,
+                &mut translator_publication,
+                &mut core,
+                &mut translator,
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                &sockets,
+            ));
             pair_sockets.remove_owned();
             return Err(format!(
                 "paired Herdr process ended: core={core_status:?} translator={translator_status:?} backend={backend_status:?}"
@@ -701,6 +993,64 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::UnixListener;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn teardown_budget_uses_absolute_floor_thirds() {
+        let budget = TeardownBudget::from_total(Duration::ZERO);
+        assert_eq!(budget.grace, Duration::ZERO);
+        assert_eq!(budget.nexus, Duration::ZERO);
+        assert_eq!(budget.global, Duration::ZERO);
+
+        let budget = TeardownBudget::from_total(Duration::from_nanos(5));
+        assert_eq!(budget.grace, Duration::from_nanos(1));
+        assert_eq!(budget.nexus, Duration::from_nanos(3));
+        assert_eq!(budget.global, Duration::from_nanos(5));
+
+        let budget = TeardownBudget::from_total(Duration::from_nanos(2));
+        assert_eq!(budget.grace, Duration::ZERO);
+        assert_eq!(budget.nexus, Duration::from_nanos(1));
+        assert_eq!(budget.global, Duration::from_nanos(2));
+
+        let budget = TeardownBudget::from_total(Duration::from_nanos(8));
+        assert_eq!(budget.grace, Duration::from_nanos(2));
+        assert_eq!(budget.nexus, Duration::from_nanos(5));
+        assert_eq!(budget.global, Duration::from_nanos(8));
+
+        let budget = TeardownBudget::from_total(Duration::MAX);
+        assert!(budget.grace <= budget.nexus);
+        assert!(budget.nexus <= budget.global);
+    }
+
+    #[test]
+    fn teardown_deadlines_share_one_start_and_global_budget() {
+        let start = Instant::now();
+        let deadlines = TeardownDeadlines::new(start, Duration::from_millis(5_000))
+            .expect("deadlines");
+        assert_eq!(deadlines.grace.duration_since(start), Duration::from_nanos(1_666_666_666));
+        assert_eq!(deadlines.nexus.duration_since(start), Duration::from_nanos(3_333_333_333));
+        assert_eq!(deadlines.global.duration_since(start), Duration::from_millis(5_000));
+        assert!(TeardownDeadlines::new(start, Duration::MAX).is_err());
+    }
+
+    #[test]
+    fn escalation_reserves_one_poll_or_the_whole_remaining_phase() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(100);
+        assert_eq!(
+            escalation_at_from(start, deadline, Duration::from_millis(25)),
+            start + Duration::from_millis(75),
+        );
+        let late = start + Duration::from_millis(90);
+        assert_eq!(
+            escalation_at_from(late, deadline, Duration::from_millis(25)),
+            late,
+        );
+        assert_eq!(escalation_at_from(deadline, deadline, Duration::from_millis(25)), deadline);
+        assert_eq!(
+            escalation_at_from(deadline + Duration::from_millis(1), deadline, Duration::from_millis(25)),
+            deadline,
+        );
+    }
 
     #[test]
     fn pending_stop_is_observed_before_runtime_or_state_effects() {

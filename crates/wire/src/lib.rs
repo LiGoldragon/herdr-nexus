@@ -11,13 +11,13 @@ pub mod transport_types;
 
 pub fn socket_names() -> transport_types::SocketNames {
     transport_types::SocketNames {
-        public_nexus_socket: transport_types::PublicNexusSocket("herdr.sock".into()),
-        meta_nexus_socket: transport_types::MetaNexusSocket("herdr-meta.sock".into()),
+        public_nexus_socket: transport_types::PublicNexusSocket("herdr-nexus.sock".into()),
+        meta_nexus_socket: transport_types::MetaNexusSocket("herdr-nexus-meta.sock".into()),
         public_translator_socket: transport_types::PublicTranslatorSocket(
-            "herdr-translator.sock".into(),
+            "herdr-nexus-translator.sock".into(),
         ),
         meta_translator_socket: transport_types::MetaTranslatorSocket(
-            "herdr-meta-translator.sock".into(),
+            "herdr-nexus-meta-translator.sock".into(),
         ),
     }
 }

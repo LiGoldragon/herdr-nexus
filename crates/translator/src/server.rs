@@ -2087,7 +2087,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir(&directory).expect("fixture directory");
-        let core_path = directory.join("herdr.sock");
+        let core_path = directory.join("herdr-nexus.sock");
         let front_path = directory.join(
             herdr_nexus_wire::socket_names()
                 .public_translator_socket

@@ -582,13 +582,11 @@ pub fn request_backend_stop(
     environment: &AnchoredEnvironment,
     session: &str,
     sockets: &BackendSockets,
+    deadline: Instant,
 ) -> Result<(), String> {
     if !sockets.still_owned() {
         return Err("backend socket ownership changed before stop".into());
     }
-    let deadline = Instant::now()
-        .checked_add(deployment.stop_timeout)
-        .ok_or_else(|| "stop deadline overflow".to_owned())?;
     let arguments = [
         OsString::from("--session"),
         OsString::from(session),
