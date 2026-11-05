@@ -266,6 +266,11 @@ fn escalation_at_from(now: Instant, deadline: Instant, poll: Duration) -> Instan
     deadline.checked_sub(poll.min(remaining)).unwrap_or(deadline)
 }
 
+fn next_poll_deadline(now: Instant, deadline: Instant, poll: Duration) -> Instant {
+    let bounded = poll.min(deadline.saturating_duration_since(now));
+    now.checked_add(bounded).unwrap_or(deadline).min(deadline)
+}
+
 fn kill_if_live(child: &mut OwnedChild, name: &str, first: &mut Option<String>) {
     if !exited(child, name, first) {
         remember_first(first, child.signal(rustix::process::Signal::KILL).map_err(|error| format!("kill {name}: {error}")));
@@ -327,6 +332,37 @@ fn report_cleanup_after_prior(result: Result<(), String>) {
     }
 }
 
+fn cancel_owned_after_deadline_failure(
+    core: &mut OwnedChild,
+    mut translator: Option<&mut OwnedChild>,
+    backend: &mut OwnedChild,
+    deadline_error: String,
+) -> Result<(), String> {
+    let mut cleanup = None;
+    kill_if_live(core, "core", &mut cleanup);
+    if let Some(child) = translator.as_deref_mut() {
+        kill_if_live(child, "translator", &mut cleanup);
+    }
+    kill_if_live(backend, "backend", &mut cleanup);
+    for (child, name) in [(&mut *core, "core"), (&mut *backend, "backend")] {
+        if !exited(child, name, &mut cleanup) {
+            remember_first(&mut cleanup, Err(format!(
+                "{name} reap unresolved after teardown deadline construction failed"
+            )));
+        }
+    }
+    if let Some(child) = translator.as_deref_mut() {
+        if !exited(child, "translator", &mut cleanup) {
+            remember_first(
+                &mut cleanup,
+                Err("translator reap unresolved after teardown deadline construction failed".into()),
+            );
+        }
+    }
+    report_cleanup_after_prior(cleanup.map_or(Ok(()), Err));
+    Err(deadline_error)
+}
+
 fn terminate_core_and_backend(
     core_publication: &mut Option<herdr_nexus_wire::publication::ParentChannel>,
     core: &mut OwnedChild,
@@ -336,9 +372,22 @@ fn terminate_core_and_backend(
     session: &str,
     sockets: &BackendSockets,
 ) -> Result<(), String> {
-    let deadlines = TeardownDeadlines::new(Instant::now(), deployment.stop_timeout);
+    let start = Instant::now();
     drop(core_publication.take());
-    terminate_owned(core, None, backend, deployment, environment, session, sockets, deadlines?)
+    let deadlines = TeardownDeadlines::new(start, deployment.stop_timeout);
+    match deadlines {
+        Ok(deadlines) => terminate_owned(
+            core,
+            None,
+            backend,
+            deployment,
+            environment,
+            session,
+            sockets,
+            deadlines,
+        ),
+        Err(error) => cancel_owned_after_deadline_failure(core, None, backend, error),
+    }
 }
 
 fn terminate_all(
@@ -352,13 +401,26 @@ fn terminate_all(
     session: &str,
     sockets: &BackendSockets,
 ) -> Result<(), String> {
-    let deadlines = TeardownDeadlines::new(Instant::now(), deployment.stop_timeout);
+    let start = Instant::now();
     // Closing the sole parent endpoints is the graceful stop for a child
     // blocked before listener acknowledgement. Move them out so no later
     // path can accidentally keep the publication capability alive.
     drop(core_publication.take());
     drop(translator_publication.take());
-    terminate_owned(core, Some(translator), backend, deployment, environment, session, sockets, deadlines?)
+    let deadlines = TeardownDeadlines::new(start, deployment.stop_timeout);
+    match deadlines {
+        Ok(deadlines) => terminate_owned(
+            core,
+            Some(translator),
+            backend,
+            deployment,
+            environment,
+            session,
+            sockets,
+            deadlines,
+        ),
+        Err(error) => cancel_owned_after_deadline_failure(core, Some(translator), backend, error),
+    }
 }
 
 fn terminate_owned(
@@ -424,7 +486,7 @@ fn terminate_owned(
         (core_done, translator_done) = wait_pair_until(
             core,
             translator.as_deref_mut(),
-            (Instant::now() + deployment.poll_interval).min(deadlines.global),
+            next_poll_deadline(Instant::now(), deadlines.global, deployment.poll_interval),
             deployment.poll_interval,
             &mut first,
         );
@@ -1048,6 +1110,21 @@ mod tests {
         assert_eq!(escalation_at_from(deadline, deadline, Duration::from_millis(25)), deadline);
         assert_eq!(
             escalation_at_from(deadline + Duration::from_millis(1), deadline, Duration::from_millis(25)),
+            deadline,
+        );
+    }
+
+    #[test]
+    fn next_poll_deadline_clamps_before_checked_addition() {
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(1);
+        assert_eq!(next_poll_deadline(start, deadline, Duration::MAX), deadline);
+        assert_eq!(
+            next_poll_deadline(deadline, deadline, Duration::MAX),
+            deadline,
+        );
+        assert_eq!(
+            next_poll_deadline(deadline + Duration::from_nanos(1), deadline, Duration::MAX),
             deadline,
         );
     }
