@@ -187,7 +187,9 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 name = "herdr-nexus-core"
 version = "0.1.0"
 dependencies = [
+ "datom-codec 0.32.3",
  "emission-herdr-nexus",
+ "protos",
  "rkyv",
  "signal-herdr-nexus",
  "translator",
@@ -235,9 +237,11 @@ name = "herdr-nexus-wire"
 version = "0.1.0"
 dependencies = [
  "core-meta-herdr-nexus",
+ "datom-codec 0.32.3",
  "libc",
  "meta-signal-herdr-nexus",
  "nix",
+ "protos",
  "rkyv",
  "signal",
  "signal-herdr-nexus",
