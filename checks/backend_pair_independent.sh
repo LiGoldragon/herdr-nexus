@@ -226,7 +226,7 @@ require_backend_ready() {
 
 wait_nexus() {
   for _ in $(seq 1 300); do
-    [[ -S $runtime/herdr-meta.sock && -S $runtime/herdr-meta-translator.sock ]] && return 0
+    [[ -S $runtime/herdr-nexus-meta.sock && -S $runtime/herdr-nexus-meta-translator.sock ]] && return 0
     kill -0 "$pair_pid" 2>/dev/null || break
     sleep .02
   done
@@ -284,7 +284,7 @@ assert_admission_closed() {
 assert_admission_closed_except() {
   local exception=$1
   local socket
-  for socket in herdr.sock herdr-meta.sock herdr-translator.sock herdr-meta-translator.sock; do
+  for socket in herdr-nexus.sock herdr-nexus-meta.sock herdr-nexus-translator.sock herdr-nexus-meta-translator.sock; do
     [[ $runtime/$socket == "$exception" ]] && continue
     [[ ! -S $runtime/$socket ]]
   done
@@ -341,7 +341,7 @@ unknown_translator=$case_root/uncooperative-translator
 cp "$fake" "$unknown_translator"
 chmod +x "$unknown_translator"
 launch_translator=$unknown_translator
-expected_unknown=$runtime/herdr-translator.sock
+expected_unknown=$runtime/herdr-nexus-translator.sock
 launch; require_backend_ready
 for _ in $(seq 1 300); do
   unknown_pid=$(sed -n 's/^FIXTURE_UNKNOWN_CHILD pid=\([0-9][0-9]*\) path=.*/\1/p' "$case_root/pair.log" | tail -n 1)

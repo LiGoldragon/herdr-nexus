@@ -141,7 +141,7 @@ static int bind_unix(const char *path) {
 static int bind_unknown_listener(void) {
   const char *runtime = getenv("FIXTURE_RUNTIME");
   char path[4096];
-  if (!runtime || join(path, sizeof path, runtime, "herdr-translator.sock") < 0)
+  if (!runtime || join(path, sizeof path, runtime, "herdr-nexus-translator.sock") < 0)
     return 80;
   int fd = bind_unix(path);
   if (fd < 0) return 81;
