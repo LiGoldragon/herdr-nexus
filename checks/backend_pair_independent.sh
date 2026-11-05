@@ -68,6 +68,8 @@ trap cleanup EXIT
 
 case_root= place= deployment= config_root= state_root= runtime= state= pair_pid=
 expected_unknown=
+expected_backend_closed=1
+last_stop_elapsed=
 launch_core=$core launch_translator=$translator
 prepare() {
   current_case=$1
@@ -84,6 +86,7 @@ prepare() {
   launch_core=$core
   launch_translator=$translator
   expected_unknown=
+  expected_backend_closed=1
 }
 
 launch() {
@@ -101,10 +104,10 @@ launch() {
 }
 
 wait_fixture_child() {
-  local pid=
+  local expected_executable=${1:-$fake} pid=
   for _ in $(seq 1 300); do
     pid=$(sed -n 's/^FIXTURE_BLOCKING_CHILD pid=//p' "$case_root/pair.log" | tail -n 1)
-    if [[ -n $pid && -r /proc/$pid/stat && $(readlink "/proc/$pid/exe") == "$fake" ]]; then
+    if [[ -n $pid && -r /proc/$pid/stat && $(readlink "/proc/$pid/exe") == "$expected_executable" ]]; then
       printf '%s' "$pid"
       return 0
     fi
@@ -183,13 +186,30 @@ stop_startup_phase() {
   set -e
   unset 'active_launchers[$pair_pid]'
   elapsed=$(($(date +%s%3N) - began))
+  last_stop_elapsed=$elapsed
   [[ $pair_status == 0 ]]
-  (( elapsed < 2500 ))
+  # StopTimeout is 400 ms in Deployment. Scheduler allowance is outside the
+  # launcher's budget assertion; an additive per-child timeout would exceed
+  # this bound by several multiples.
+  (( elapsed < 650 ))
   for ((index = 0; index < ${#children[@]}; index++)); do
     wait_exact_exit "${children[$index]}" "${starts[$index]}"
   done
+  if [[ -f $runtime/fixture.stop-parent-children ]]; then
+    # children[0] is the backend being asked to stop. Every paired child must
+    # already have been reaped before the orderly backend command is spawned.
+    for ((index = 1; index < ${#children[@]}; index++)); do
+      ! grep -qw "${children[$index]}" "$runtime/fixture.stop-parent-children"
+    done
+  fi
   assert_admission_closed_except "$expected_unknown"
-  assert_backend_closed
+  if (( expected_backend_closed )); then
+    assert_backend_closed
+  else
+    local session; session=$(session_name)
+    [[ -S $config_root/herdr/sessions/$session/herdr.sock ]]
+    [[ -S $config_root/herdr/sessions/$session/herdr-client.sock ]]
+  fi
   [[ ! -e $runtime/o ]]
   [[ -f $runtime/unrelated ]]
   [[ -f $state/unrelated-state ]]
@@ -198,6 +218,28 @@ stop_startup_phase() {
     [[ $(stat -Lc '%d:%i' "$expected_unknown") == "$unknown_identity" ]]
     echo "PRESERVED_UNKNOWN_SOCKET path=$expected_unknown identity=$unknown_identity"
   fi
+}
+
+event_time() {
+  local event=$1
+  awk -v event="$event" '$3 == event { print $1; exit }' "$runtime/fixture.lifecycle"
+}
+
+assert_event_before() {
+  local first=$1 second=$2 first_time second_time
+  first_time=$(event_time "$first")
+  second_time=$(event_time "$second")
+  [[ -n $first_time && -n $second_time ]]
+  (( first_time <= second_time ))
+}
+
+assert_event_delta() {
+  local first=$1 second=$2 minimum=$3 maximum=$4 first_time second_time delta
+  first_time=$(event_time "$first")
+  second_time=$(event_time "$second")
+  [[ -n $first_time && -n $second_time ]]
+  delta=$((second_time - first_time))
+  (( delta >= minimum && delta <= maximum ))
 }
 
 wait_backend() {
@@ -267,7 +309,7 @@ stop_pair() {
   local pid=$pair_pid
   kill "$pid"
   wait_exit "$pid"
-  reap_launcher "$pid" 2>/dev/null || true
+  reap_launcher "$pid"
 }
 
 assert_no_children() {
@@ -318,6 +360,7 @@ core_fixture_pid=$(wait_fixture_child)
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
 [[ $core_fixture_pid != "$backend_pid" ]]
 stop_startup_phase "$backend_pid" "$core_fixture_pid"
+assert_event_before PAIRED_CHILD_TERM_OBSERVED BACKEND_STOP_REQUESTED
 
 prepare stop-translator-publication
 launch_translator=$fake
@@ -332,6 +375,69 @@ for child in $(cat /proc/$pair_pid/task/$pair_pid/children); do
 done
 [[ -n $core_pid ]]
 stop_startup_phase "$backend_pid" "$core_pid" "$translator_fixture_pid"
+assert_event_before PAIRED_CHILD_TERM_OBSERVED BACKEND_STOP_REQUESTED
+
+# Forced teardown at each paired-child startup edge remains within the same
+# single StopTimeout. The backend stop is attempted only after the child that
+# ignored TERM has been killed and reaped.
+for forced_role in core translator; do
+  prepare forced-$forced_role-publication
+  uncooperative_child=$case_root/uncooperative-child-$forced_role
+  cp "$fake" "$uncooperative_child"
+  chmod +x "$uncooperative_child"
+  if [[ $forced_role == core ]]; then
+    launch_core=$uncooperative_child
+  else
+    launch_translator=$uncooperative_child
+  fi
+  launch; require_backend_ready
+  forced_pid=$(wait_fixture_child "$uncooperative_child")
+  backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+  forced_children=("$backend_pid")
+  if [[ $forced_role == translator ]]; then
+    core_pid=
+    for child in $(cat /proc/$pair_pid/task/$pair_pid/children); do
+      executable=$(readlink "/proc/$child/exe" 2>/dev/null)
+      [[ $executable == *herdr-nexus-daemon ]] && core_pid=$child
+    done
+    [[ -n $core_pid ]]
+    forced_children+=("$core_pid")
+  fi
+  forced_children+=("$forced_pid")
+  forced_starttime=$(process_starttime "$forced_pid")
+  backend_starttime=$(process_starttime "$backend_pid")
+  stop_startup_phase "${forced_children[@]}"
+  wait_exact_exit "$forced_pid" "$forced_starttime"
+  wait_exact_exit "$backend_pid" "$backend_starttime"
+  grep -q ' PAIRED_CHILD_TERM_IGNORED$' "$runtime/fixture.lifecycle"
+  grep -q ' BACKEND_STOP_REQUESTED$' "$runtime/fixture.lifecycle"
+  assert_event_delta PAIRED_CHILD_TERM_IGNORED BACKEND_STOP_REQUESTED 50 250
+  (( last_stop_elapsed >= 150 ))
+done
+
+# Even when an earlier paired child needed forced reaping and the backend also
+# ignores orderly stop and TERM, global expiry cancels and reaps both exact
+# process lifetimes. No backend-exit record is expected after SIGKILL.
+prepare forced-global-expiry
+uncooperative_child=$case_root/uncooperative-child-core
+cp "$fake" "$uncooperative_child"
+chmod +x "$uncooperative_child"
+launch_core=$uncooperative_child
+mkdir -p "$state_root"; touch "$state_root/ignore-term"
+expected_backend_closed=0
+launch; require_backend_ready
+forced_pid=$(wait_fixture_child "$uncooperative_child")
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+forced_starttime=$(process_starttime "$forced_pid")
+backend_starttime=$(process_starttime "$backend_pid")
+stop_startup_phase "$backend_pid" "$forced_pid"
+wait_exact_exit "$forced_pid" "$forced_starttime"
+wait_exact_exit "$backend_pid" "$backend_starttime"
+grep -q ' PAIRED_CHILD_TERM_IGNORED$' "$runtime/fixture.lifecycle"
+grep -q ' BACKEND_TERM_OBSERVED$' "$runtime/fixture.lifecycle"
+! grep -q ' BACKEND_EXITING$' "$runtime/fixture.lifecycle"
+assert_event_delta PAIRED_CHILD_TERM_IGNORED BACKEND_STOP_REQUESTED 50 250
+(( last_stop_elapsed >= 300 ))
 
 # An uncooperative child that never publishes leaves a socket whose identity
 # the parent never received. Closing its private channel and reaping it must
@@ -377,8 +483,20 @@ XDG_RUNTIME_DIR=$case_root/run "$package/bin/herdr-nexus" "$positive_name" \
 assert_environment_file "$state_root/fixture.client-environment"
 read -r -a positive_children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
 [[ ${#positive_children[@]} -eq 3 ]]
+backend_pid=$(cat "$state_root/fixture.$positive_name.pid")
+positive_starts=()
+for child in "${positive_children[@]}"; do
+  positive_starts+=("$(process_starttime "$child")")
+done
 stop_pair
-assert_no_children "${positive_children[@]}"
+for ((index = 0; index < ${#positive_children[@]}; index++)); do
+  wait_exact_exit "${positive_children[$index]}" "${positive_starts[$index]}"
+done
+grep -q ' BACKEND_STOP_REQUESTED$' "$runtime/fixture.lifecycle"
+for child in "${positive_children[@]}"; do
+  [[ $child == "$backend_pid" ]] && continue
+  ! grep -qw "$child" "$runtime/fixture.stop-parent-children"
+done
 assert_admission_closed
 [[ -f $state/unrelated-state ]]
 [[ -f $config_root/herdr/sessions/unrelated/keep ]]
@@ -465,6 +583,10 @@ for role in backend core translator; do
   launch; require_backend_ready; configure_ready loss-$role
   read -r -a children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
   [[ ${#children[@]} -eq 3 ]]
+  child_starts=()
+  for child in "${children[@]}"; do
+    child_starts+=("$(process_starttime "$child")")
+  done
   for child in "${children[@]}"; do kill -0 "$child"; done
   target=
   for child in "${children[@]}"; do
@@ -478,7 +600,9 @@ for role in backend core translator; do
   [[ -n $target ]]
   kill "$target"
   wait_exit "$pair_pid"; ! reap_launcher "$pair_pid"
-  for child in "${children[@]}"; do wait_exit "$child"; done
+  for ((index = 0; index < ${#children[@]}; index++)); do
+    wait_exact_exit "${children[$index]}" "${child_starts[$index]}"
+  done
   assert_admission_closed
 done
 
@@ -495,9 +619,24 @@ prepare escalation
 mkdir -p "$state_root"; touch "$state_root/ignore-term"
 launch; require_backend_ready
 backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
-backend_starttime=$(process_starttime "$backend_pid")
+read -r -a escalation_children <<<"$(cat /proc/$pair_pid/task/$pair_pid/children)"
+[[ ${#escalation_children[@]} -eq 3 ]]
+escalation_starts=()
+for child in "${escalation_children[@]}"; do
+  escalation_starts+=("$(process_starttime "$child")")
+done
+escalation_began=$(date +%s%3N)
 stop_pair
-wait_exact_exit "$backend_pid" "$backend_starttime"
+escalation_elapsed=$(($(date +%s%3N) - escalation_began))
+(( escalation_elapsed < 650 ))
+for ((index = 0; index < ${#escalation_children[@]}; index++)); do
+  wait_exact_exit "${escalation_children[$index]}" "${escalation_starts[$index]}"
+  [[ ${escalation_children[$index]} == "$backend_pid" ]] && continue
+  ! grep -qw "${escalation_children[$index]}" "$runtime/fixture.stop-parent-children"
+done
+grep -q ' BACKEND_STOP_REQUESTED$' "$runtime/fixture.lifecycle"
+grep -q ' BACKEND_TERM_OBSERVED$' "$runtime/fixture.lifecycle"
+! grep -q ' BACKEND_EXITING$' "$runtime/fixture.lifecycle"
 assert_admission_closed
 [[ ! -e $runtime/o ]]
 

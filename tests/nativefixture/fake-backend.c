@@ -16,13 +16,51 @@ static char api_socket[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char client_socket[sizeof(((struct sockaddr_un *)0)->sun_path)];
 static char pid_path[4096];
 static int api_fd = -1, client_fd = -1;
+static int join(char *out, size_t n, const char *a, const char *b);
 
 static void on_signal(int signal_number) { (void)signal_number; stopping = 1; }
+
+static void lifecycle(const char *root, const char *event) {
+  char path[4096];
+  struct timespec now;
+  if (!root || join(path, sizeof path, root, "fixture.lifecycle") < 0 ||
+      clock_gettime(CLOCK_MONOTONIC, &now) < 0) return;
+  FILE *output = fopen(path, "a");
+  if (!output) return;
+  fprintf(output, "%lld pid=%ld %s\n",
+          (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000,
+          (long)getpid(), event);
+  fclose(output);
+}
+
+static int record_stop_parent_children(const char *root) {
+  char source[128], destination[4096], buffer[4096];
+  int written = snprintf(source, sizeof source, "/proc/%ld/task/%ld/children",
+                         (long)getppid(), (long)getppid());
+  if (!root || written < 0 || (size_t)written >= sizeof source ||
+      join(destination, sizeof destination, root,
+           "fixture.stop-parent-children") < 0) return -1;
+  FILE *input = fopen(source, "r");
+  FILE *output = fopen(destination, "w");
+  if (!input || !output) {
+    if (input) fclose(input);
+    if (output) fclose(output);
+    return -1;
+  }
+  size_t count = fread(buffer, 1, sizeof buffer - 1, input);
+  int read_failed = ferror(input);
+  buffer[count] = '\0';
+  fprintf(output, "%s", buffer);
+  int input_status = fclose(input);
+  int output_status = fclose(output);
+  return !read_failed && input_status == 0 && output_status == 0 ? 0 : -1;
+}
 
 /* A core/translator stand-in that binds nothing and publishes nothing. The
  * pair can therefore be stopped deterministically while it awaits that
  * child's first listener publication. */
 static int block_as_paired_child(void) {
+  const char *runtime = getenv("FIXTURE_RUNTIME");
   struct sigaction action;
   memset(&action, 0, sizeof action);
   action.sa_handler = on_signal;
@@ -31,8 +69,28 @@ static int block_as_paired_child(void) {
       sigaction(SIGINT, &action, NULL) < 0) return 79;
   fprintf(stderr, "FIXTURE_BLOCKING_CHILD pid=%ld\n", (long)getpid());
   fflush(stderr);
+  lifecycle(runtime, "PAIRED_CHILD_STARTED");
   while (!stopping) pause();
+  lifecycle(runtime, "PAIRED_CHILD_TERM_OBSERVED");
   return 0;
+}
+
+static int block_as_uncooperative_paired_child(void) {
+  const char *runtime = getenv("FIXTURE_RUNTIME");
+  struct sigaction action;
+  memset(&action, 0, sizeof action);
+  action.sa_handler = on_signal;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGTERM, &action, NULL) < 0 ||
+      sigaction(SIGINT, &action, NULL) < 0) return 79;
+  fprintf(stderr, "FIXTURE_BLOCKING_CHILD pid=%ld\n", (long)getpid());
+  fflush(stderr);
+  lifecycle(runtime, "PAIRED_CHILD_STARTED_UNCOOPERATIVE");
+  for (;;) {
+    while (!stopping) pause();
+    lifecycle(runtime, "PAIRED_CHILD_TERM_IGNORED");
+    stopping = 0;
+  }
 }
 
 static int join(char *out, size_t n, const char *a, const char *b) {
@@ -218,7 +276,15 @@ static int serve(const char *session, const char *config, const char *state) {
   if (has(state, "exit-after-ready")) { cleanup(); return 77; }
   struct sigaction action; memset(&action, 0, sizeof action); action.sa_handler = on_signal;
   sigemptyset(&action.sa_mask); sigaction(SIGTERM, &action, NULL); sigaction(SIGINT, &action, NULL);
-  for (;;) { pause(); if (!stopping) continue; if (has(state, "ignore-term")) { stopping = 0; continue; } break; }
+  lifecycle(getenv("FIXTURE_RUNTIME"), "BACKEND_STARTED");
+  for (;;) {
+    pause();
+    if (!stopping) continue;
+    lifecycle(getenv("FIXTURE_RUNTIME"), "BACKEND_TERM_OBSERVED");
+    if (has(state, "ignore-term")) { stopping = 0; continue; }
+    break;
+  }
+  lifecycle(getenv("FIXTURE_RUNTIME"), "BACKEND_EXITING");
   cleanup(); return 0;
 }
 
@@ -226,6 +292,8 @@ int main(int argc, char **argv) {
   if (argc == 1) {
     const char *name = strrchr(argv[0], '/');
     name = name ? name + 1 : argv[0];
+    if (strstr(name, "uncooperative-child"))
+      return block_as_uncooperative_paired_child();
     if (strstr(name, "uncooperative")) return bind_unknown_listener();
     return block_as_paired_child();
   }
@@ -251,6 +319,11 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (strcmp(argv[3], "server") != 0) return 64;
-  if (argc == 5 && strcmp(argv[4], "stop") == 0) { pid_t pid; return read_pid(&pid) == 0 && kill(pid, SIGTERM) == 0 ? 0 : 1; }
+  if (argc == 5 && strcmp(argv[4], "stop") == 0) {
+    pid_t pid;
+    if (record_stop_parent_children(getenv("FIXTURE_RUNTIME")) < 0) return 82;
+    lifecycle(getenv("FIXTURE_RUNTIME"), "BACKEND_STOP_REQUESTED");
+    return read_pid(&pid) == 0 && kill(pid, SIGTERM) == 0 ? 0 : 1;
+  }
   return argc == 4 ? serve(argv[2], config, state) : 64;
 }
