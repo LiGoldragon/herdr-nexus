@@ -9,6 +9,7 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
+use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -19,6 +20,25 @@ const REMOVED_HERDR_ENVIRONMENT: [&str; 4] = [
     "HERDR_CLIENT_SOCKET_PATH",
     "HERDR_SESSION",
 ];
+
+/// Restore the signal mask inherited before the pair blocked its owned stop
+/// signals. This is the only pre-exec boundary.
+pub fn restore_child_signal_mask(command: &mut Command, inherited: nix::sys::signal::SigSet) {
+    // SAFETY: the closure executes after fork and before exec, when the child
+    // is single-threaded. nix::pthread_sigmask directly invokes the
+    // async-signal-safe pthread_sigmask primitive; the captured SigSet owns
+    // its data and the closure allocates, logs, and locks nothing.
+    unsafe {
+        command.pre_exec(move || {
+            nix::sys::signal::pthread_sigmask(
+                nix::sys::signal::SigmaskHow::SIG_SETMASK,
+                Some(&inherited),
+                None,
+            )
+            .map_err(|error| std::io::Error::from_raw_os_error(error as i32))
+        });
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ValidatedDeployment {
@@ -485,6 +505,7 @@ pub fn spawn_backend(
     deployment: &ValidatedDeployment,
     environment: &AnchoredEnvironment,
     session: &str,
+    inherited_signal_mask: nix::sys::signal::SigSet,
 ) -> Result<OwnedChild, String> {
     let mut command = Command::new(&deployment.executable);
     command
@@ -493,6 +514,7 @@ pub fn spawn_backend(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     environment.apply(&mut command);
+    restore_child_signal_mask(&mut command, inherited_signal_mask);
     OwnedChild::spawn(&mut command, &deployment.executable)
 }
 
@@ -502,11 +524,15 @@ pub fn await_backend(
     session: &str,
     backend: &mut OwnedChild,
     expected: &BackendSockets,
-) -> Result<(), String> {
+    mut stop_requested: impl FnMut() -> Result<bool, String>,
+) -> Result<bool, String> {
     let deadline = Instant::now()
         .checked_add(deployment.readiness_timeout)
         .ok_or_else(|| "readiness deadline overflow".to_owned())?;
     loop {
+        if stop_requested()? {
+            return Ok(false);
+        }
         if let Some(status) = backend.try_wait()? {
             return Err(format!("backend exited before readiness: {status}"));
         }
@@ -531,7 +557,7 @@ pub fn await_backend(
                 && ready_json(&captured.stdout, session, &expected.api_path)
                 && expected.clone().capture().is_ok()
             {
-                return Ok(());
+                return Ok(true);
             }
         }
         if Instant::now() >= deadline {

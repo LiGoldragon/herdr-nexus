@@ -1,6 +1,7 @@
 use herdr_nexus_translator::backend_pair::{
-    await_backend, bounded_stop, request_backend_stop, spawn_backend, AnchoredEnvironment,
-    BackendSockets, OwnedChild, OwnedRuntimeSocket, RuntimeClaim, ValidatedDeployment,
+    await_backend, bounded_stop, request_backend_stop, restore_child_signal_mask, spawn_backend,
+    AnchoredEnvironment, BackendSockets, OwnedChild, OwnedRuntimeSocket, RuntimeClaim,
+    ValidatedDeployment,
 };
 use herdr_nexus_translator::generated::backend_deployment::BackendDeployment;
 use herdr_nexus_translator::{maximum_text_budget, transport_types::*};
@@ -16,6 +17,34 @@ use std::process::{Command, Stdio};
 
 struct PairSockets {
     sockets: Vec<(Listener, String, Option<OwnedRuntimeSocket>)>,
+}
+
+fn stop_requested(signal_fd: &SignalFd) -> Result<bool, String> {
+    signal_fd
+        .read_signal()
+        .map(|signal| signal.is_some())
+        .map_err(|error| format!("read owned stop signal: {error}"))
+}
+
+fn acquire_owned_stop_signals() -> Result<(SigSet, SignalFd), Box<dyn std::error::Error>> {
+    let mut owned = SigSet::empty();
+    owned.add(Signal::SIGTERM);
+    owned.add(Signal::SIGINT);
+    let mut inherited = SigSet::empty();
+    nix::sys::signal::pthread_sigmask(
+        SigmaskHow::SIG_BLOCK,
+        Some(&owned),
+        Some(&mut inherited),
+    )?;
+    let signal_fd = SignalFd::with_flags(
+        &owned,
+        SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC,
+    )?;
+    Ok((inherited, signal_fd))
+}
+
+fn lifetime_start_allowed(signal_fd: &SignalFd) -> Result<bool, String> {
+    stop_requested(signal_fd).map(|stop| !stop)
 }
 
 impl PairSockets {
@@ -75,17 +104,40 @@ impl PairSockets {
         translator: &mut OwnedChild,
         backend: &mut OwnedChild,
         claim: &RuntimeClaim,
-    ) -> Result<(), String> {
-        if core.try_wait()?.is_some() || translator.try_wait()?.is_some() || backend.try_wait()?.is_some() {
-            return Err("paired child ended before listener publication".into());
+        signal_fd: &SignalFd,
+        timeout: std::time::Duration,
+        poll_interval: std::time::Duration,
+    ) -> Result<bool, String> {
+        let deadline = std::time::Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| "listener publication deadline overflow".to_owned())?;
+        loop {
+            if stop_requested(signal_fd)? {
+                return Ok(false);
+            }
+            if core.try_wait()?.is_some() || translator.try_wait()?.is_some() || backend.try_wait()?.is_some() {
+                return Err("paired child ended before listener publication".into());
+            }
+            if let Some(publication) = channel.try_receive()? {
+                if stop_requested(signal_fd)? {
+                    return Ok(false);
+                }
+                self.commit_publication(&publication, expected_listener.clone(), claim, || {
+                    Ok(core.try_wait()?.is_none()
+                        && translator.try_wait()?.is_none()
+                        && backend.try_wait()?.is_none())
+                })?;
+                if stop_requested(signal_fd)? {
+                    return Ok(false);
+                }
+                channel.acknowledge(expected_listener)?;
+                return Ok(true);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("listener publication timed out".into());
+            }
+            std::thread::sleep(poll_interval.min(deadline.saturating_duration_since(std::time::Instant::now())));
         }
-        let publication = channel.receive()?;
-        self.commit_publication(&publication, expected_listener.clone(), claim, || {
-            Ok(core.try_wait()?.is_none()
-                && translator.try_wait()?.is_none()
-                && backend.try_wait()?.is_none())
-        })?;
-        channel.acknowledge(expected_listener)
     }
 
     fn remove_owned(&self) {
@@ -206,24 +258,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     .map_err(|error| format!("{error:?}"))?;
     let deployment = ValidatedDeployment::try_from(deployment)?;
     shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
+    let (inherited_signal_mask, signal_fd) = acquire_owned_stop_signals()?;
+    if stop_requested(&signal_fd)? {
+        return Ok(());
+    }
     let instance_id = fresh_instance_id()?;
     let runtime = shared_translator::placement::runtime_path(&place);
     let state = shared_translator::placement::state_path(&place);
     let claim = RuntimeClaim::acquire(&runtime, &deployment.claim_name)?;
+    if stop_requested(&signal_fd)? {
+        return Ok(());
+    }
     let mut pair_sockets = PairSockets::expected();
     pair_sockets.refuse_existing(&claim)?;
     let environment = AnchoredEnvironment::open(&state, &deployment)?;
+    if stop_requested(&signal_fd)? {
+        return Ok(());
+    }
     let expected_sockets = BackendSockets::expected(&environment, &place.metaflow_name.0);
     expected_sockets.refuse_existing()?;
 
-    let mut backend = spawn_backend(&deployment, &environment, &place.metaflow_name.0)?;
-    if let Err(error) = await_backend(
+    let mut backend = spawn_backend(
+        &deployment,
+        &environment,
+        &place.metaflow_name.0,
+        inherited_signal_mask.clone(),
+    )?;
+    let backend_ready = await_backend(
         &deployment,
         &environment,
         &place.metaflow_name.0,
         &mut backend,
         &expected_sockets,
-    ) {
+        || stop_requested(&signal_fd),
+    );
+    let backend_ready = match backend_ready {
+        Ok(ready) => ready,
+        Err(error) => {
+            terminate_backend(
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                None,
+            );
+            return Err(error.into());
+        }
+    };
+    if !backend_ready {
         terminate_backend(
             &mut backend,
             &deployment,
@@ -231,7 +313,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &place.metaflow_name.0,
             None,
         );
-        return Err(error.into());
+        return Ok(());
+    }
+    match stop_requested(&signal_fd) {
+        Ok(false) => {}
+        stop => {
+            terminate_backend(
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                None,
+            );
+            return match stop {
+                Ok(true) => Ok(()),
+                Err(error) => Err(error.into()),
+                Ok(false) => unreachable!(),
+            };
+        }
     }
     let sockets = match expected_sockets.capture() {
         Ok(sockets) => sockets,
@@ -246,12 +345,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     };
-    let (core_publication, core_child_publication) =
-        herdr_nexus_wire::publication::pair()?;
-    core_publication.set_deadline(deployment.readiness_timeout)?;
-    let core_publication_channel = core_child_publication.prepare_for_spawn()?;
+    let core_channels = (|| -> Result<_, String> {
+        let (parent, child) = herdr_nexus_wire::publication::pair()?;
+        parent.set_deadline(deployment.readiness_timeout)?;
+        let channel = child.prepare_for_spawn()?;
+        Ok((parent, child, channel))
+    })();
+    let (core_publication, core_child_publication, core_publication_channel) =
+        match core_channels {
+            Ok(channels) => channels,
+            Err(error) => {
+                terminate_backend(&mut backend, &deployment, &environment, &place.metaflow_name.0, Some(&sockets));
+                return Err(error.into());
+            }
+        };
     let mut core_command = Command::new(&core_executable);
     core_command.stdin(Stdio::piped());
+    restore_child_signal_mask(&mut core_command, inherited_signal_mask.clone());
     let mut core = match OwnedChild::spawn(&mut core_command, Path::new(&core_executable)) {
         Ok(child) => child,
         Err(error) => {
@@ -260,13 +370,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     drop(core_child_publication);
-    let (translator_publication, translator_child_publication) =
-        herdr_nexus_wire::publication::pair()?;
-    translator_publication.set_deadline(deployment.readiness_timeout)?;
-    let translator_publication_channel = translator_child_publication.prepare_for_spawn()?;
+    match stop_requested(&signal_fd) {
+        Ok(false) => {}
+        stop => {
+            terminate_nexus(&mut core, &deployment);
+            terminate_backend(
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                Some(&sockets),
+            );
+            pair_sockets.remove_owned();
+            return match stop {
+                Ok(true) => Ok(()),
+                Err(error) => Err(error.into()),
+                Ok(false) => unreachable!(),
+            };
+        }
+    }
+    let translator_channels = (|| -> Result<_, String> {
+        let (parent, child) = herdr_nexus_wire::publication::pair()?;
+        parent.set_deadline(deployment.readiness_timeout)?;
+        let channel = child.prepare_for_spawn()?;
+        Ok((parent, child, channel))
+    })();
+    let (translator_publication, translator_child_publication, translator_publication_channel) =
+        match translator_channels {
+            Ok(channels) => channels,
+            Err(error) => {
+                terminate_nexus(&mut core, &deployment);
+                terminate_backend(&mut backend, &deployment, &environment, &place.metaflow_name.0, Some(&sockets));
+                pair_sockets.remove_owned();
+                return Err(error.into());
+            }
+        };
     let mut translator_command = Command::new(&translator_executable);
     translator_command.stdin(Stdio::piped());
     environment.apply(&mut translator_command);
+    restore_child_signal_mask(&mut translator_command, inherited_signal_mask);
     let mut translator = match OwnedChild::spawn(&mut translator_command, Path::new(&translator_executable)) {
         Ok(child) => child,
         Err(error) => {
@@ -277,11 +419,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     drop(translator_child_publication);
+    match stop_requested(&signal_fd) {
+        Ok(false) => {}
+        stop => {
+            terminate_all(
+                &mut core,
+                &mut translator,
+                &mut backend,
+                &deployment,
+                &environment,
+                &place.metaflow_name.0,
+                &sockets,
+            );
+            pair_sockets.remove_owned();
+            return match stop {
+                Ok(true) => Ok(()),
+                Err(error) => Err(error.into()),
+                Ok(false) => unreachable!(),
+            };
+        }
+    }
     let user_id = UserId(i64::from(Uid::current().as_raw()));
     let core_pid = ProcessId(i64::from(core.child.id()));
     let translator_pid = ProcessId(i64::from(translator.child.id()));
     let capacity = FrameCapacity::from(signal::MAXIMUM_SIGNAL_BYTES);
+    let mut bootstrap_stop = false;
     let bootstrapped = (|| -> Result<(), Box<dyn std::error::Error>> {
+        if stop_requested(&signal_fd)? {
+            bootstrap_stop = true;
+            return Err("pair stop requested during bootstrap".into());
+        }
         let mut core_input = core.child.stdin.take().ok_or("core bootstrap pipe")?;
         core_input.write_frame(
             &CoreBootstrap {
@@ -299,6 +466,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         core_input.flush()?;
         drop(core_input);
+
+        if stop_requested(&signal_fd)? {
+            bootstrap_stop = true;
+            return Err("pair stop requested during bootstrap".into());
+        }
 
         let mut translator_input = translator.child.stdin.take().ok_or("translator bootstrap pipe")?;
         translator_input.write_frame(
@@ -321,6 +493,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         translator_input.flush()?;
         drop(translator_input);
+        if stop_requested(&signal_fd)? {
+            bootstrap_stop = true;
+            return Err("pair stop requested during bootstrap".into());
+        }
         Ok(())
     })();
     if let Err(error) = bootstrapped {
@@ -334,56 +510,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &sockets,
         );
         pair_sockets.remove_owned();
+        if bootstrap_stop {
+            return Ok(());
+        }
         return Err(error);
     }
 
-    let initial_publications = (|| -> Result<(), String> {
-        pair_sockets.accept_publication(
+    let initial_publications = (|| -> Result<bool, String> {
+        if !pair_sockets.accept_publication(
             &core_publication,
             Listener::MetaNexus,
             &mut core,
             &mut translator,
             &mut backend,
             &claim,
-        )?;
-        pair_sockets.accept_publication(
+            &signal_fd,
+            deployment.readiness_timeout,
+            deployment.poll_interval,
+        )? { return Ok(false); }
+        if !pair_sockets.accept_publication(
             &translator_publication,
             Listener::PublicTranslator,
             &mut core,
             &mut translator,
             &mut backend,
             &claim,
-        )?;
-        pair_sockets.accept_publication(
+            &signal_fd,
+            deployment.readiness_timeout,
+            deployment.poll_interval,
+        )? { return Ok(false); }
+        if !pair_sockets.accept_publication(
             &translator_publication,
             Listener::MetaTranslator,
             &mut core,
             &mut translator,
             &mut backend,
             &claim,
-        )
+            &signal_fd,
+            deployment.readiness_timeout,
+            deployment.poll_interval,
+        )? { return Ok(false); }
+        Ok(true)
     })();
-    if let Err(error) = initial_publications {
-        terminate_all(
-            &mut core,
-            &mut translator,
-            &mut backend,
-            &deployment,
-            &environment,
-            &place.metaflow_name.0,
-            &sockets,
-        );
-        pair_sockets.remove_owned();
-        return Err(error.into());
-    }
-
-    let mut mask = SigSet::empty();
-    mask.add(Signal::SIGTERM);
-    mask.add(Signal::SIGINT);
-    let signal_fd = match nix::sys::signal::pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&mask), None)
-        .and_then(|()| SignalFd::with_flags(&mask, SfdFlags::SFD_NONBLOCK | SfdFlags::SFD_CLOEXEC))
-    {
-        Ok(signal_fd) => signal_fd,
+    let initial_publications = match initial_publications {
+        Ok(published) => published,
         Err(error) => {
             terminate_all(
                 &mut core,
@@ -398,21 +568,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error.into());
         }
     };
+    if !initial_publications {
+        terminate_all(
+            &mut core,
+            &mut translator,
+            &mut backend,
+            &deployment,
+            &environment,
+            &place.metaflow_name.0,
+            &sockets,
+        );
+        pair_sockets.remove_owned();
+        return Ok(());
+    }
+    match lifetime_start_allowed(&signal_fd) {
+        Ok(true) => {}
+        allowed => {
+            terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+            pair_sockets.remove_owned();
+            return match allowed {
+                Ok(false) => Ok(()),
+                Err(error) => Err(error.into()),
+                Ok(true) => unreachable!(),
+            };
+        }
+    }
     loop {
+        match stop_requested(&signal_fd) {
+            Ok(true) => {
+                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                pair_sockets.remove_owned();
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(error) => {
+                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                pair_sockets.remove_owned();
+                return Err(error.into());
+            }
+        }
         match core_publication.try_receive() {
             Ok(Some(publication)) => {
-                let committed = pair_sockets.commit_publication(
-                    &publication,
-                    Listener::PublicNexus,
-                    &claim,
-                    || Ok(core.try_wait()?.is_none()
-                        && translator.try_wait()?.is_none()
-                        && backend.try_wait()?.is_none()),
-                ).and_then(|()| core_publication.acknowledge(Listener::PublicNexus));
-                if let Err(error) = committed {
-                    terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
-                    pair_sockets.remove_owned();
-                    return Err(error.into());
+                let committed = (|| -> Result<bool, String> {
+                    if stop_requested(&signal_fd)? { return Ok(false); }
+                    pair_sockets.commit_publication(
+                        &publication,
+                        Listener::PublicNexus,
+                        &claim,
+                        || Ok(core.try_wait()?.is_none()
+                            && translator.try_wait()?.is_none()
+                            && backend.try_wait()?.is_none()),
+                    )?;
+                    if stop_requested(&signal_fd)? { return Ok(false); }
+                    core_publication.acknowledge(Listener::PublicNexus)?;
+                    Ok(true)
+                })();
+                match committed {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                        pair_sockets.remove_owned();
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
+                        pair_sockets.remove_owned();
+                        return Err(error.into());
+                    }
                 }
             }
             Ok(None) => {}
@@ -468,27 +690,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .into());
         }
-        let received_signal = match signal_fd.read_signal() {
-            Ok(signal) => signal,
-            Err(error) => {
-                terminate_all(&mut core, &mut translator, &mut backend, &deployment, &environment, &place.metaflow_name.0, &sockets);
-                pair_sockets.remove_owned();
-                return Err(error.into());
-            }
-        };
-        if received_signal.is_some() {
-            terminate_all(
-                &mut core,
-                &mut translator,
-                &mut backend,
-                &deployment,
-                &environment,
-                &place.metaflow_name.0,
-                &sockets,
-            );
-            pair_sockets.remove_owned();
-            return Ok(());
-        }
         std::thread::sleep(deployment.poll_interval);
     }
 }
@@ -500,6 +701,46 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::net::UnixListener;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pending_stop_is_observed_before_runtime_or_state_effects() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let absent = std::env::temp_dir().join(format!(
+            "herdr-pair-pre-effect-{}-{nonce}",
+            std::process::id()
+        ));
+        let runtime = absent.join("runtime");
+        let state = absent.join("state");
+        let (inherited, signal_fd) = acquire_owned_stop_signals().expect("signal controller");
+        nix::sys::signal::raise(Signal::SIGTERM).expect("queue stop");
+        let observed = stop_requested(&signal_fd).expect("read stop");
+        nix::sys::signal::pthread_sigmask(
+            SigmaskHow::SIG_SETMASK,
+            Some(&inherited),
+            None,
+        )
+        .expect("restore test mask");
+        assert!(observed);
+        assert!(!runtime.exists());
+        assert!(!state.exists());
+    }
+
+    #[test]
+    fn pending_stop_prevents_lifetime_entry_after_initial_publications() {
+        let (inherited, signal_fd) = acquire_owned_stop_signals().expect("signal controller");
+        nix::sys::signal::raise(Signal::SIGTERM).expect("queue stop on this test thread");
+        let allowed = lifetime_start_allowed(&signal_fd).expect("read stop");
+        nix::sys::signal::pthread_sigmask(
+            SigmaskHow::SIG_SETMASK,
+            Some(&inherited),
+            None,
+        )
+        .expect("restore test mask");
+        assert!(!allowed);
+    }
 
     #[test]
     fn failed_post_capture_witness_does_not_expand_cleanup_authority() {
