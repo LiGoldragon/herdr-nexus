@@ -323,16 +323,6 @@ pub enum PublicDispatch {
     Subscribe(signal_herdr_nexus::Session),
 }
 
-impl PublicDispatch {
-    #[cfg(test)]
-    fn answered(self) -> Option<signal_herdr_nexus::Response> {
-        match self {
-            Self::Answered(response) => Some(response),
-            Self::Subscribe(_) => None,
-        }
-    }
-}
-
 pub trait ExternalEmitter: Send + Sync {
     fn emit(
         &self,
@@ -508,43 +498,6 @@ impl Dispatcher {
             next_subscription_generation: std::sync::atomic::AtomicU64::new(1),
             configuration,
         }
-    }
-
-    #[cfg(test)]
-    fn with_emitter(paths: &SocketPaths, emitter: Arc<dyn ExternalEmitter>) -> Self {
-        let configuration = Arc::new(ConfigurationStore::default());
-        *configuration.current.write().expect("configuration") =
-            Some(Arc::new(ReadyCoreConfiguration {
-                polling: Duration::from_millis(10),
-                start_timeout: Duration::from_millis(20),
-                frame_capacity_bytes: 4096,
-                transport_timeout: Duration::from_millis(30),
-                subscriber_capacity: 8,
-            }));
-        let mut dispatcher = Self::new(
-            paths,
-            configuration,
-            signal_herdr_nexus::InstanceId("test-instance".into()),
-        );
-        dispatcher.emitter = emitter;
-        dispatcher
-    }
-
-    #[cfg(test)]
-    pub fn dispatch(
-        &self,
-        query: signal_herdr_nexus::Query,
-        configuration: Arc<ReadyCoreConfiguration>,
-    ) -> signal_herdr_nexus::Response {
-        self.dispatch_as(
-            shared_translator::Principal::Login(shared_translator::UserId(i64::from(
-                nix::unistd::getuid().as_raw(),
-            ))),
-            query,
-            configuration,
-        )
-        .answered()
-        .expect("test helper received a streaming subscription")
     }
 
     pub fn dispatch_as(
@@ -1071,15 +1024,6 @@ impl Dispatcher {
             drop(hub);
             drop(state);
         }
-    }
-
-    #[cfg(test)]
-    fn subscription_source_count(&self) -> usize {
-        self.subscriptions
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .sessions
-            .len()
     }
 
     fn execute(
@@ -1867,6 +1811,69 @@ fn invalid_peer(message: &str) -> meta_signal_herdr_nexus::ConfigurationRefusal 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    trait AnsweredForTest {
+        fn answered(self) -> Option<signal_herdr_nexus::Response>;
+    }
+
+    impl AnsweredForTest for PublicDispatch {
+        fn answered(self) -> Option<signal_herdr_nexus::Response> {
+            match self {
+                Self::Answered(response) => Some(response),
+                Self::Subscribe(_) => None,
+            }
+        }
+    }
+
+    trait DispatcherForTest {
+        fn with_emitter(paths: &SocketPaths, emitter: Arc<dyn ExternalEmitter>) -> Dispatcher;
+        fn dispatch(
+            &self,
+            query: signal_herdr_nexus::Query,
+            configuration: Arc<ReadyCoreConfiguration>,
+        ) -> signal_herdr_nexus::Response;
+        fn subscription_source_count(&self) -> usize;
+    }
+
+    impl DispatcherForTest for Dispatcher {
+        /// The shipped constructor, given a configuration with short timings.
+        fn with_emitter(paths: &SocketPaths, emitter: Arc<dyn ExternalEmitter>) -> Dispatcher {
+            let configuration = Arc::new(ConfigurationStore::default());
+            *configuration.current.write().expect("configuration") =
+                Some(test_configuration());
+            let mut dispatcher = Dispatcher::new(
+                paths,
+                configuration,
+                signal_herdr_nexus::InstanceId("test-instance".into()),
+            );
+            dispatcher.emitter = emitter;
+            dispatcher
+        }
+
+        fn dispatch(
+            &self,
+            query: signal_herdr_nexus::Query,
+            configuration: Arc<ReadyCoreConfiguration>,
+        ) -> signal_herdr_nexus::Response {
+            self.dispatch_as(
+                shared_translator::Principal::Login(shared_translator::UserId(i64::from(
+                    nix::unistd::getuid().as_raw(),
+                ))),
+                query,
+                configuration,
+            )
+            .answered()
+            .expect("test helper received a streaming subscription")
+        }
+
+        fn subscription_source_count(&self) -> usize {
+            self.subscriptions
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .sessions
+                .len()
+        }
+    }
 
     struct CountingEmitter(std::sync::atomic::AtomicUsize);
 
@@ -2704,6 +2711,8 @@ mod tests {
         let (dispatcher, emitter, pane) = started_dispatcher(Vec::new());
         let (server_one, _client_one) = std::os::unix::net::UnixStream::pair().expect("pair one");
         let (server_two, _client_two) = std::os::unix::net::UnixStream::pair().expect("pair two");
+        let baseline = emitter.list_count.load(std::sync::atomic::Ordering::SeqCst);
+        let started = std::time::Instant::now();
         dispatcher
             .subscribe(server_one, pane.session.clone(), test_configuration())
             .expect("first");
@@ -2711,11 +2720,26 @@ mod tests {
             .subscribe(server_two, pane.session.clone(), test_configuration())
             .expect("second");
         assert_eq!(dispatcher.subscription_source_count(), 1);
-        std::thread::sleep(Duration::from_millis(35));
-        let polls = emitter.list_count.load(std::sync::atomic::Ordering::SeqCst);
+        // Readiness: wait until the shared source has polled enough times to
+        // show its cadence, within a deadline.
+        let wanted = baseline + 6;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut polls = emitter.list_count.load(std::sync::atomic::Ordering::SeqCst);
+        while polls < wanted && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(2));
+            polls = emitter.list_count.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        let elapsed = started.elapsed();
+        assert!(polls >= wanted, "shared source did not poll, got {polls}");
+        // One source polls once per interval, plus its first immediate poll;
+        // two independent sources would poll about twice as often. The bound
+        // scales with the time actually elapsed, so load only loosens it.
+        let interval = test_configuration().polling;
+        let allowed = (elapsed.as_millis() / interval.as_millis()) as usize + 2;
         assert!(
-            (1..=5).contains(&polls),
-            "one shared source should poll at one cadence, got {polls}"
+            polls - baseline <= allowed,
+            "one shared source should poll at one cadence, got {} in {elapsed:?}",
+            polls - baseline
         );
     }
 
