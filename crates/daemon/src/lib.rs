@@ -93,21 +93,26 @@ impl Bootstrap {
         &self,
         setting: core_meta_herdr_nexus::CoreSet,
     ) -> core_meta_herdr_nexus::Response {
-        self.store.configure(setting, || {
+        let mut staged = None;
+        let response = self.store.configure(setting, || {
             let listener = OwnedListener::bind(self.paths.public.clone()).map_err(|error| {
                 BootstrapRefusal {
                     socket_path: SocketPath(self.paths.public.display().to_string()),
                     message: Message(error.to_string()),
                 }
             })?;
+            staged = Some(listener);
+            Ok(())
+        });
+        if let Some(listener) = staged {
             let mut public = self
                 .public
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             *public = Some(listener);
             self.public_ready.notify_all();
-            Ok(())
-        })
+        }
+        response
     }
 
     pub fn snapshot(&self) -> Option<Arc<ReadyCoreConfiguration>> {
