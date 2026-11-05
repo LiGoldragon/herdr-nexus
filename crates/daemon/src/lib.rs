@@ -626,7 +626,11 @@ impl Dispatcher {
                 let outcome = state
                     .core
                     .start(pane.clone(), command, start.label, started_result(external));
-                if outcome == signal_herdr_nexus::Outcome::Done {
+                if matches!(
+                    outcome,
+                    signal_herdr_nexus::Outcome::Done
+                        | signal_herdr_nexus::Outcome::Uncertain
+                ) {
                     bump_revision(&mut state.revisions, pane);
                 }
                 Response::Started(outcome)
@@ -648,7 +652,16 @@ impl Dispatcher {
                     },
                 );
                 let mut state = self.finish_reservation(&prompt.pane, reservation);
-                Response::Prompted(state.core.prompt(prompt.pane, text, done_result(external)))
+                let pane = prompt.pane;
+                let outcome = state.core.prompt(pane.clone(), text, done_result(external));
+                if matches!(
+                    outcome,
+                    signal_herdr_nexus::Outcome::Done
+                        | signal_herdr_nexus::Outcome::Uncertain
+                ) {
+                    bump_revision(&mut state.revisions, pane);
+                }
+                Response::Prompted(outcome)
             }
             Operation::Pressing(press) => {
                 let reservation = match self.reserve(&principal, &press.pane) {
@@ -667,7 +680,16 @@ impl Dispatcher {
                     },
                 );
                 let mut state = self.finish_reservation(&press.pane, reservation);
-                Response::Pressed(state.core.press(press.pane, keys, done_result(external)))
+                let pane = press.pane;
+                let outcome = state.core.press(pane.clone(), keys, done_result(external));
+                if matches!(
+                    outcome,
+                    signal_herdr_nexus::Outcome::Done
+                        | signal_herdr_nexus::Outcome::Uncertain
+                ) {
+                    bump_revision(&mut state.revisions, pane);
+                }
+                Response::Pressed(outcome)
             }
             Operation::Closing(pane) => {
                 let reservation = match self.reserve(&principal, &pane) {
@@ -693,6 +715,8 @@ impl Dispatcher {
                 if outcome == signal_herdr_nexus::Outcome::Done {
                     state.revisions.remove(&pane);
                     state.principals.remove(&pane);
+                } else if outcome == signal_herdr_nexus::Outcome::Uncertain {
+                    bump_revision(&mut state.revisions, pane);
                 }
                 Response::Closed(outcome)
             }
