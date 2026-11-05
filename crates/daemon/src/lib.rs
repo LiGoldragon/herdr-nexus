@@ -1501,6 +1501,7 @@ struct PartialConfiguration {
 
 #[derive(Default)]
 pub struct ConfigurationStore {
+    configuration_transaction: std::sync::Mutex<()>,
     partial: RwLock<PartialConfiguration>,
     current: RwLock<Option<Arc<ReadyCoreConfiguration>>>,
     subscriber_queues: std::sync::Mutex<Vec<std::sync::Weak<SubscriberQueue>>>,
@@ -1563,6 +1564,10 @@ impl ConfigurationStore {
         use meta_signal_herdr_nexus::{
             ConfigurationRefusal, Invalid_Data, Message, Owner, Readiness, SettingName,
         };
+        let _transaction = self
+            .configuration_transaction
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if matches!(setting, core_meta_herdr_nexus::CoreSet::Peer(_) | core_meta_herdr_nexus::CoreSet::RemovePeer(_)) {
             return self.configure_peer(setting);
         }
