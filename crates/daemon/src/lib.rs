@@ -793,6 +793,16 @@ impl Dispatcher {
         PublicDispatch::Answered(response)
     }
 
+    pub fn peer_grant_is_current(
+        &self,
+        caller: &shared_translator::Caller,
+        peer_id: &shared_translator::PeerId,
+        generation: u64,
+    ) -> bool {
+        self.configuration
+            .peer_grant_is_current(caller, peer_id, generation)
+    }
+
     fn reserve(&self, principal: &shared_translator::Principal, pane: &signal_herdr_nexus::Pane) -> Result<u64, signal_herdr_nexus::Outcome> {
         use signal_herdr_nexus::{AttemptInProgress, Outcome};
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
@@ -1524,6 +1534,19 @@ impl ConfigurationStore {
             }
             peer.matches(caller).then(|| (peer_id.clone(), peer.generation))
         })
+    }
+
+    fn peer_grant_is_current(
+        &self,
+        caller: &shared_translator::Caller,
+        peer_id: &shared_translator::PeerId,
+        generation: u64,
+    ) -> bool {
+        self.peers
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(peer_id)
+            .is_some_and(|peer| peer.generation == generation && peer.matches(caller))
     }
 
     pub fn configure(

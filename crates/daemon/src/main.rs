@@ -61,6 +61,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let herdr_nexus_wire::public_call::Query::Call(call) = call;
                 let actual = herdr_nexus_wire::frame::peer_caller(&stream)?;
                 let peer_grant = authority.peer_grant();
+                if let Some((peer_id, generation)) = &peer_grant {
+                    if !dispatcher.peer_grant_is_current(&actual, peer_id, *generation) {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "configured peer binding changed before request dispatch",
+                        )
+                        .into());
+                    }
+                }
                 let principal = herdr_nexus_daemon::principal_for(&authority, &actual, &call.caller)?;
                 let response = match dispatcher.dispatch_as(
                     principal.clone(),
