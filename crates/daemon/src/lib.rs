@@ -2015,7 +2015,8 @@ mod tests {
         };
         public_bound_receiver.recv_timeout(Duration::from_secs(1)).expect("public listener publication");
         assert!(response_receiver.try_recv().is_err(), "Configure returned before publication ACK");
-        let mut client = std::os::unix::net::UnixStream::connect(directory.join("herdr.sock"))
+        let public_socket = herdr_nexus_wire::socket_names().public_nexus_socket.0;
+        let mut client = std::os::unix::net::UnixStream::connect(directory.join(public_socket))
             .expect("connect bound but nonserving public listener");
         client.set_read_timeout(Some(Duration::from_millis(20))).expect("bounded client read");
         let mut byte = [0_u8; 1];
