@@ -156,11 +156,17 @@ impl Memory for InMemory {
     }
 
     fn finish_created(&mut self, creation_id: &CreationId, pane: Pane) -> Answer {
-        let Some(pending) = self.pending.remove(creation_id) else {
+        let Some(pending) = self.pending.get(creation_id).cloned() else {
             return Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
                 "creation identifier is not pending".into(),
             )));
         };
+        if self.panes.contains_key(&pane) {
+            return Answer::Failed(MemoryRefusal(signal_herdr_nexus::Message(
+                "created pane is already owned".into(),
+            )));
+        }
+        self.pending.remove(creation_id);
         self.panes.insert(
             pane.clone(),
             OwnedPane {
