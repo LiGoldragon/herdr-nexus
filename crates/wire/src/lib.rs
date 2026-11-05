@@ -51,10 +51,11 @@ impl TryFrom<&transport_types::Admission> for ValidAdmission {
             frame_capacity,
             retry_delay,
         )?;
+        use shared_translator::unix::AdmissionAccess;
         Ok(Self {
-            deadline: admission.deadline,
-            frame_capacity: admission.frame_capacity,
-            retry_delay: admission.retry_delay,
+            deadline: admission.deadline(),
+            frame_capacity: admission.frame_capacity(),
+            retry_delay: admission.retry_delay(),
         })
     }
 }

@@ -305,7 +305,7 @@ dependencies = [
 [[package]]
 name = "meta-signal-herdr-nexus"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=1c85502#1c855028eb1a6c66ee7977b82ed4dbaa76a92da4"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=b2bda6e#b2bda6e44295c296371aa966f93e963a7547beef"
 dependencies = [
  "datom-codec 0.32.3",
  "protos",
@@ -614,7 +614,7 @@ dependencies = [
 [[package]]
 name = "translator"
 version = "0.1.0"
-source = "git+https://github.com/LiGoldragon/translator?rev=751c326f11c874b527a69ce6377ce9e196aeca37#751c326f11c874b527a69ce6377ce9e196aeca37"
+source = "git+https://github.com/LiGoldragon/translator?rev=3a434151152fcc5c0e0c36994c52c7cb96457a65#3a434151152fcc5c0e0c36994c52c7cb96457a65"
 dependencies = [
  "datom-codec 0.32.3",
  "libc",

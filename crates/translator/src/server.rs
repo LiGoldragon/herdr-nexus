@@ -862,7 +862,8 @@ impl Runtime {
 
 fn positive_duration(milliseconds: i64) -> Option<Duration> {
     let milliseconds = u64::try_from(milliseconds).ok()?;
-    (milliseconds != 0).then(|| Duration::from_millis(milliseconds))
+    let duration = Duration::from_millis(milliseconds);
+    (!duration.is_zero() && Instant::now().checked_add(duration).is_some()).then_some(duration)
 }
 
 impl Arguable for WorkspaceCreate_Data {
