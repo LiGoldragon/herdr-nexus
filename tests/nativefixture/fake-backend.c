@@ -19,6 +19,22 @@ static int api_fd = -1, client_fd = -1;
 
 static void on_signal(int signal_number) { (void)signal_number; stopping = 1; }
 
+/* A core/translator stand-in that binds nothing and publishes nothing. The
+ * pair can therefore be stopped deterministically while it awaits that
+ * child's first listener publication. */
+static int block_as_paired_child(void) {
+  struct sigaction action;
+  memset(&action, 0, sizeof action);
+  action.sa_handler = on_signal;
+  sigemptyset(&action.sa_mask);
+  if (sigaction(SIGTERM, &action, NULL) < 0 ||
+      sigaction(SIGINT, &action, NULL) < 0) return 79;
+  fprintf(stderr, "FIXTURE_BLOCKING_CHILD pid=%ld\n", (long)getpid());
+  fflush(stderr);
+  while (!stopping) pause();
+  return 0;
+}
+
 static int join(char *out, size_t n, const char *a, const char *b) {
   int written = snprintf(out, n, "%s/%s", a, b);
   return written >= 0 && (size_t)written < n ? 0 : -1;
@@ -190,6 +206,7 @@ static int serve(const char *session, const char *config, const char *state) {
 }
 
 int main(int argc, char **argv) {
+  if (argc == 1) return block_as_paired_child();
   if (argc < 4 || strcmp(argv[1], "--session") != 0) return 64;
   const char *config = getenv("XDG_CONFIG_HOME"), *state = getenv("XDG_STATE_HOME");
   if (!config) return 65;

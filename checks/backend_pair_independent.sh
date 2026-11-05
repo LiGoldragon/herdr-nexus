@@ -27,7 +27,7 @@ failure() {
   trap - ERR
   set +e
   echo "BACKEND_PAIR_CASE_FAILED case=$current_case line=$line status=$status" >&2
-  echo "COMMAND=$launcher PLACE=${place:-<unset>} DEPLOYMENT=${deployment:-<unset>} CORE=$core TRANSLATOR=$translator 70000 8388608 25 1048576 64" >&2
+  echo "COMMAND=$launcher PLACE=${place:-<unset>} DEPLOYMENT=${deployment:-<unset>} CORE=${launch_core:-$core} TRANSLATOR=${launch_translator:-$translator} 70000 8388608 25 1048576 64" >&2
   if [[ -n ${pair_pid:-} && -r /proc/$pair_pid/status ]]; then
     echo "PAIR_PID=$pair_pid CHILDREN=$(cat /proc/$pair_pid/task/$pair_pid/children 2>/dev/null)" >&2
     sed -n '/^Name:/p;/^State:/p;/^Pid:/p;/^PPid:/p;/^Uid:/p' "/proc/$pair_pid/status" >&2
@@ -67,6 +67,7 @@ cleanup() {
 trap cleanup EXIT
 
 case_root= place= deployment= config_root= state_root= runtime= state= pair_pid=
+launch_core=$core launch_translator=$translator
 prepare() {
   current_case=$1
   case_index=$((case_index + 1))
@@ -79,6 +80,8 @@ prepare() {
   mkdir -p "$runtime" "$state" "$case_root/home"
   place="{ $name $runtime $state }"
   deployment="{ $fake [ c ] [ s ] o 3000 200 400 20 1048576 }"
+  launch_core=$core
+  launch_translator=$translator
 }
 
 launch() {
@@ -88,10 +91,25 @@ launch() {
   HERDR_SOCKET_PATH=/poison/api.sock \
   HERDR_CLIENT_SOCKET_PATH=/poison/client.sock \
   HERDR_SESSION=poison \
-    "$launcher" "$place" "$deployment" "$core" "$translator" \
+    "$launcher" "$place" "$deployment" "$launch_core" "$launch_translator" \
       70000 8388608 25 1048576 64 >"$log" 2>&1 &
   pair_pid=$!
   active_launchers[$pair_pid]=1
+}
+
+wait_fixture_child() {
+  local pid=
+  for _ in $(seq 1 300); do
+    pid=$(sed -n 's/^FIXTURE_BLOCKING_CHILD pid=//p' "$case_root/pair.log" | tail -n 1)
+    if [[ -n $pid && -r /proc/$pid/stat && $(readlink "/proc/$pid/exe") == "$fake" ]]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+    kill -0 "$pair_pid" 2>/dev/null || break
+    sleep .02
+  done
+  cat "$case_root/pair.log" >&2
+  return 1
 }
 
 reap_launcher() {
@@ -140,6 +158,35 @@ wait_exact_exit() {
   sed -n '/^Name:/p;/^State:/p;/^Pid:/p;/^PPid:/p;/^Uid:/p' "/proc/$pid/status" >&2 || true
   echo "EXE=$(readlink "/proc/$pid/exe" 2>/dev/null) STAT=$(cat "/proc/$pid/stat" 2>/dev/null)" >&2
   return 1
+}
+
+stop_startup_phase() {
+  local children=("$@") child starts=() index began elapsed pair_status
+  [[ ${#children[@]} -ge 1 ]]
+  for child in "${children[@]}"; do
+    [[ $(awk '{ print $4 }' "/proc/$child/stat") == "$pair_pid" ]]
+    starts+=("$(process_starttime "$child")")
+  done
+  touch "$runtime/unrelated" "$state/unrelated-state"
+  began=$(date +%s%3N)
+  kill "$pair_pid"
+  wait_exit "$pair_pid"
+  set +e
+  wait "$pair_pid"
+  pair_status=$?
+  set -e
+  unset 'active_launchers[$pair_pid]'
+  elapsed=$(($(date +%s%3N) - began))
+  [[ $pair_status == 0 ]]
+  (( elapsed < 2500 ))
+  for ((index = 0; index < ${#children[@]}; index++)); do
+    wait_exact_exit "${children[$index]}" "${starts[$index]}"
+  done
+  assert_admission_closed
+  assert_backend_closed
+  [[ ! -e $runtime/o ]]
+  [[ -f $runtime/unrelated ]]
+  [[ -f $state/unrelated-state ]]
 }
 
 wait_backend() {
@@ -226,9 +273,48 @@ assert_admission_closed() {
   done
 }
 
+assert_backend_closed() {
+  local session; session=$(session_name)
+  [[ ! -S $config_root/herdr/sessions/$session/herdr.sock ]]
+  [[ ! -S $config_root/herdr/sessions/$session/herdr-client.sock ]]
+}
+
 # Public surface remains exactly one Place; extra deployment data is private.
 [[ $("$public" 2>&1 || printf ':%s' "$?") == *':64' ]]
 [[ $("$public" '{}' extra 2>&1 || printf ':%s' "$?") == *':64' ]]
+
+# A stop is consumed, and every exact owned child is reaped, at each
+# externally distinguishable startup phase. Checkpoints before the first
+# effect and exactly between the three initial ACKs and the steady loop have
+# no black-box witness and are covered by source-private units.
+prepare stop-backend-readiness
+mkdir -p "$state_root"; touch "$state_root/status-not-running"
+launch; wait_backend
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+[[ -n $(process_starttime "$backend_pid") ]]
+stop_startup_phase "$backend_pid"
+
+prepare stop-core-publication
+launch_core=$fake
+launch; require_backend_ready
+core_fixture_pid=$(wait_fixture_child)
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+[[ $core_fixture_pid != "$backend_pid" ]]
+stop_startup_phase "$backend_pid" "$core_fixture_pid"
+
+prepare stop-translator-publication
+launch_translator=$fake
+launch; require_backend_ready
+translator_fixture_pid=$(wait_fixture_child)
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+[[ $translator_fixture_pid != "$backend_pid" ]]
+core_pid=
+for child in $(cat /proc/$pair_pid/task/$pair_pid/children); do
+  executable=$(readlink "/proc/$child/exe" 2>/dev/null)
+  [[ $executable == *herdr-nexus-daemon ]] && core_pid=$child
+done
+[[ -n $core_pid ]]
+stop_startup_phase "$backend_pid" "$core_pid" "$translator_fixture_pid"
 
 # Positive owned lifecycle, typed Ready, exact environment and State survival.
 prepare positive
