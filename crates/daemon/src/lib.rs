@@ -1537,7 +1537,10 @@ impl ConfigurationStore {
                 SettingName::FrameCapacity,
                 usize::try_from(value.0)
                     .ok()
-                    .filter(|value| (1..=signal::MAXIMUM_SIGNAL_BYTES).contains(value))
+                    .filter(|value| {
+                        (herdr_nexus_wire::frame::HEADER_BYTES..=signal::MAXIMUM_SIGNAL_BYTES)
+                            .contains(value)
+                    })
                     .map(|value| candidate.frame_capacity_bytes = Some(value))
                     .is_some(),
             ),
