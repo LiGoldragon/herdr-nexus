@@ -1627,6 +1627,10 @@ impl ConfigurationStore {
         let applied = setting.clone();
         match setting {
             core_meta_herdr_nexus::CoreSet::Peer(binding) => {
+                let caller = shared_translator::Caller {
+                    user_id: binding.peer_identity.user_id.clone(),
+                    process_id: binding.peer_identity.process_id.clone(),
+                };
                 let live = match shared_translator::unix::LivePeer::capture(binding.peer_identity) {
                     Ok(live) => live,
                     Err(error) => {
@@ -1635,10 +1639,18 @@ impl ConfigurationStore {
                         )));
                     }
                 };
-                let generation = self.next_peer_generation
+                let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
+                if peers.iter().any(|(peer_id, peer)| {
+                    peer_id != &binding.peer_id && peer.matches(&caller)
+                }) {
+                    return Response::ConfigureRefused(invalid_peer(
+                        "peer process identity is already bound to another peer",
+                    ));
+                }
+                let generation = self
+                    .next_peer_generation
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     .wrapping_add(1);
-                let mut peers = self.peers.lock().unwrap_or_else(|p| p.into_inner());
                 let replaced = peers
                     .insert(binding.peer_id, BoundPeer {
                         live,
