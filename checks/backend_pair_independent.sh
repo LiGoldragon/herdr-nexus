@@ -67,6 +67,7 @@ cleanup() {
 trap cleanup EXIT
 
 case_root= place= deployment= config_root= state_root= runtime= state= pair_pid=
+expected_unknown=
 launch_core=$core launch_translator=$translator
 prepare() {
   current_case=$1
@@ -82,6 +83,7 @@ prepare() {
   deployment="{ $fake [ c ] [ s ] o 3000 200 400 20 1048576 }"
   launch_core=$core
   launch_translator=$translator
+  expected_unknown=
 }
 
 launch() {
@@ -91,6 +93,7 @@ launch() {
   HERDR_SOCKET_PATH=/poison/api.sock \
   HERDR_CLIENT_SOCKET_PATH=/poison/client.sock \
   HERDR_SESSION=poison \
+  FIXTURE_RUNTIME=$runtime \
     "$launcher" "$place" "$deployment" "$launch_core" "$launch_translator" \
       70000 8388608 25 1048576 64 >"$log" 2>&1 &
   pair_pid=$!
@@ -161,13 +164,16 @@ wait_exact_exit() {
 }
 
 stop_startup_phase() {
-  local children=("$@") child starts=() index began elapsed pair_status
+  local children=("$@") child starts=() index began elapsed pair_status unknown_identity=
   [[ ${#children[@]} -ge 1 ]]
   for child in "${children[@]}"; do
     [[ $(awk '{ print $4 }' "/proc/$child/stat") == "$pair_pid" ]]
     starts+=("$(process_starttime "$child")")
   done
   touch "$runtime/unrelated" "$state/unrelated-state"
+  if [[ -n $expected_unknown ]]; then
+    unknown_identity=$(stat -Lc '%d:%i' "$expected_unknown")
+  fi
   began=$(date +%s%3N)
   kill "$pair_pid"
   wait_exit "$pair_pid"
@@ -182,11 +188,16 @@ stop_startup_phase() {
   for ((index = 0; index < ${#children[@]}; index++)); do
     wait_exact_exit "${children[$index]}" "${starts[$index]}"
   done
-  assert_admission_closed
+  assert_admission_closed_except "$expected_unknown"
   assert_backend_closed
   [[ ! -e $runtime/o ]]
   [[ -f $runtime/unrelated ]]
   [[ -f $state/unrelated-state ]]
+  if [[ -n $expected_unknown ]]; then
+    [[ -S $expected_unknown ]]
+    [[ $(stat -Lc '%d:%i' "$expected_unknown") == "$unknown_identity" ]]
+    echo "PRESERVED_UNKNOWN_SOCKET path=$expected_unknown identity=$unknown_identity"
+  fi
 }
 
 wait_backend() {
@@ -267,8 +278,14 @@ assert_no_children() {
 }
 
 assert_admission_closed() {
+  assert_admission_closed_except ""
+}
+
+assert_admission_closed_except() {
+  local exception=$1
   local socket
   for socket in herdr.sock herdr-meta.sock herdr-translator.sock herdr-meta-translator.sock; do
+    [[ $runtime/$socket == "$exception" ]] && continue
     [[ ! -S $runtime/$socket ]]
   done
 }
@@ -315,6 +332,33 @@ for child in $(cat /proc/$pair_pid/task/$pair_pid/children); do
 done
 [[ -n $core_pid ]]
 stop_startup_phase "$backend_pid" "$core_pid" "$translator_fixture_pid"
+
+# An uncooperative child that never publishes leaves a socket whose identity
+# the parent never received. Closing its private channel and reaping it must
+# not turn that unknown pathname into parent cleanup authority.
+prepare stop-unpublished-unknown
+unknown_translator=$case_root/uncooperative-translator
+cp "$fake" "$unknown_translator"
+chmod +x "$unknown_translator"
+launch_translator=$unknown_translator
+expected_unknown=$runtime/herdr-translator.sock
+launch; require_backend_ready
+for _ in $(seq 1 300); do
+  unknown_pid=$(sed -n 's/^FIXTURE_UNKNOWN_CHILD pid=\([0-9][0-9]*\) path=.*/\1/p' "$case_root/pair.log" | tail -n 1)
+  [[ -n $unknown_pid && -S $expected_unknown ]] && break
+  kill -0 "$pair_pid" 2>/dev/null || break
+  sleep .02
+done
+[[ -n ${unknown_pid:-} && -S $expected_unknown ]]
+[[ $(readlink "/proc/$unknown_pid/exe") == "$unknown_translator" ]]
+backend_pid=$(cat "$state_root/fixture.$(session_name).pid")
+core_pid=
+for child in $(cat /proc/$pair_pid/task/$pair_pid/children); do
+  executable=$(readlink "/proc/$child/exe" 2>/dev/null)
+  [[ $executable == *herdr-nexus-daemon ]] && core_pid=$child
+done
+[[ -n $core_pid ]]
+stop_startup_phase "$backend_pid" "$core_pid" "$unknown_pid"
 
 # Positive owned lifecycle, typed Ready, exact environment and State survival.
 prepare positive

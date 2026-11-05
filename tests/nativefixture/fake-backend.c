@@ -134,6 +134,23 @@ static int bind_unix(const char *path) {
   return fd;
 }
 
+/* A deliberately uncooperative translator stand-in. It creates the fixed
+ * listener but never publishes its identity and lets SIGTERM take the
+ * process down without unlinking it. The parent therefore has no authority
+ * to remove the residual pathname. */
+static int bind_unknown_listener(void) {
+  const char *runtime = getenv("FIXTURE_RUNTIME");
+  char path[4096];
+  if (!runtime || join(path, sizeof path, runtime, "herdr-translator.sock") < 0)
+    return 80;
+  int fd = bind_unix(path);
+  if (fd < 0) return 81;
+  fprintf(stderr, "FIXTURE_UNKNOWN_CHILD pid=%ld path=%s\n",
+          (long)getpid(), path);
+  fflush(stderr);
+  for (;;) pause();
+}
+
 static int read_pid(pid_t *pid) {
   FILE *input = fopen(pid_path, "r"); long value;
   if (!input) return -1;
@@ -206,7 +223,12 @@ static int serve(const char *session, const char *config, const char *state) {
 }
 
 int main(int argc, char **argv) {
-  if (argc == 1) return block_as_paired_child();
+  if (argc == 1) {
+    const char *name = strrchr(argv[0], '/');
+    name = name ? name + 1 : argv[0];
+    if (strstr(name, "uncooperative")) return bind_unknown_listener();
+    return block_as_paired_child();
+  }
   if (argc < 4 || strcmp(argv[1], "--session") != 0) return 64;
   const char *config = getenv("XDG_CONFIG_HOME"), *state = getenv("XDG_STATE_HOME");
   if (!config) return 65;
