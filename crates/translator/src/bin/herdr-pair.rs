@@ -72,7 +72,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut maximum_text_budget(),
     )
         .map_err(|error| format!("{error:?}"))?;
-    shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
+    shared_translator::placement::validate_place_name(&place.place_name.0)?;
+    shared_translator::placement::Preparable::prepare_for_start(&place)?;
     if !shared_translator::placement::runtime_path(&place).is_dir() {
         return Err(format!("metaflow runtime does not exist: {}", place.runtime.0).into());
     }

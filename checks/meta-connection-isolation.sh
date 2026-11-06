@@ -15,8 +15,8 @@ trap cleanup EXIT
 
 export XDG_RUNTIME_DIR=$base/run
 export HOME=$base/home
-directory=$XDG_RUNTIME_DIR/metaflow/one
-state=$HOME/.local/state/metaflow/one
+directory=$XDG_RUNTIME_DIR/nexus/one
+state=$HOME/.local/state/nexus/one
 mkdir -p "$directory" "$state"
 place="{ one $directory $state }"
 "$package/bin/herdr-pair" "$place" >"$base/pair.log" 2>&1 &

@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut maximum_text_budget(),
     )
         .map_err(|error| format!("{error:?}"))?;
-    shared_translator::placement::validate_metaflow_name(&place.metaflow_name.0)?;
+    shared_translator::placement::validate_place_name(&place.place_name.0)?;
     let mut output = io::stdout();
     match target.as_str() {
         "Core" => {

@@ -147,6 +147,13 @@
             ${pkgs.bash}/bin/bash "$script" "$package"
             touch "$out"
           '';
+          place-preparation = pkgs.runCommand "herdr-place-preparation" {
+            package = self.packages.${system}.default;
+            script = ./checks/place-preparation.sh;
+          } ''
+            ${pkgs.bash}/bin/bash "$script" "$package"
+            touch "$out"
+          '';
           delayed-start = pkgs.runCommand "herdr-delayed-start" {
             package = self.packages.${system}.default;
             script = ./checks/delayed-start.sh;

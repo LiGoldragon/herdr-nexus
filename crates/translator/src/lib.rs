@@ -117,7 +117,7 @@ pub use shared_translator::placement;
 pub fn text_budget(nodes: usize, depth: usize) -> datom_codec::Budget {
     datom_codec::Budget {
         remaining: i64::try_from(nodes).expect("validated text nodes fit i64"),
-        reader: protos::ReaderBudget { remaining: nodes },
+        reader: protos::ReaderBudget::try_from(nodes).expect("validated text nodes fit the reader budget"),
         depth: 0,
         maximum_depth: i64::try_from(depth).expect("validated text depth fits i64"),
     }

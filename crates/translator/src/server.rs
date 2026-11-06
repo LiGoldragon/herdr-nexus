@@ -1429,7 +1429,7 @@ mod tests {
         )
         .expect("request frame");
         let place = Place {
-            metaflow_name: shared_translator::placement::MetaflowName("test".into()),
+            place_name: shared_translator::placement::PlaceName("test".into()),
             runtime: shared_translator::placement::Runtime("/tmp".into()),
             state: shared_translator::placement::State("/tmp".into()),
         };
@@ -1465,7 +1465,7 @@ mod tests {
         )
         .expect("request frame");
         let place = Place {
-            metaflow_name: shared_translator::placement::MetaflowName("test".into()),
+            place_name: shared_translator::placement::PlaceName("test".into()),
             runtime: shared_translator::placement::Runtime("/tmp".into()),
             state: shared_translator::placement::State("/tmp".into()),
         };
@@ -1507,7 +1507,7 @@ mod tests {
         )
         .expect("request frame");
         let place = Place {
-            metaflow_name: shared_translator::placement::MetaflowName("test".into()),
+            place_name: shared_translator::placement::PlaceName("test".into()),
             runtime: shared_translator::placement::Runtime("/tmp".into()),
             state: shared_translator::placement::State("/tmp".into()),
         };
@@ -1788,7 +1788,7 @@ mod tests {
         }));
         assert!(configuration.ready().is_some());
         let place = Place {
-            metaflow_name: shared_translator::placement::MetaflowName("fixture".into()),
+            place_name: shared_translator::placement::PlaceName("fixture".into()),
             runtime: shared_translator::placement::Runtime(
                 directory.to_string_lossy().into_owned(),
             ),

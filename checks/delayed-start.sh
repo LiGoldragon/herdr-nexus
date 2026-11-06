@@ -14,8 +14,8 @@ trap cleanup EXIT
 
 export XDG_RUNTIME_DIR=$base/run
 export HOME=$base/home
-directory=$XDG_RUNTIME_DIR/metaflow/one
-state=$HOME/.local/state/metaflow/one
+directory=$XDG_RUNTIME_DIR/nexus/one
+state=$HOME/.local/state/nexus/one
 workspace=$base/workspace
 mkdir -p "$directory" "$state" "$workspace"
 place="{ one $directory $state }"

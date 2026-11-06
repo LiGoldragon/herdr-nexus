@@ -19,8 +19,8 @@ start_pair() {
   local generation=$1
   export XDG_RUNTIME_DIR=$base/$generation/run
   export HOME=$base/$generation/home
-  directory=$XDG_RUNTIME_DIR/metaflow/one
-  state=$HOME/.local/state/metaflow/one
+  directory=$XDG_RUNTIME_DIR/nexus/one
+  state=$HOME/.local/state/nexus/one
   mkdir -p "$directory" "$state"
   place="{ one $directory $state }"
   "$package/bin/herdr-pair" "$place" >"$base/$generation.log" 2>&1 &

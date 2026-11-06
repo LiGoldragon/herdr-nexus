@@ -15,6 +15,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let admission = herdr_nexus_wire::ValidAdmission::try_from(&place.admission)
         .map_err(|message| format!("invalid core bootstrap admission: {message}"))?;
+    shared_translator::placement::validate_place_name(&place.place.place_name.0)?;
+    shared_translator::placement::Preparable::prepare_for_start(&place.place)
+        .map_err(|error| format!("place preparation failed: {error}"))?;
     let bootstrap = Arc::new(herdr_nexus_daemon::Bootstrap::bind(
         &place.place,
         admission,

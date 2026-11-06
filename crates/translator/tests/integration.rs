@@ -6,7 +6,7 @@ use shared_translator::{ByteViewable, Restorable, Signal, Signalizable};
 #[test]
 fn public_query_text_binary_response_text_crosses_layers() {
     let input = "List.main";
-    let mut budget = Budget { remaining: 32, reader: protos::ReaderBudget { remaining: 32 }, depth: 0, maximum_depth: 8 };
+    let mut budget = Budget { remaining: 32, reader: protos::ReaderBudget::try_from(32).unwrap(), depth: 0, maximum_depth: 8 };
     let mut potential = Potential::<Query>::from(input);
     let query = potential.actualize(&mut budget).unwrap();
     let wire = query.signalize().unwrap();
