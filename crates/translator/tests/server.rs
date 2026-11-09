@@ -1,5 +1,5 @@
 use emission_herdr_nexus::{
-    AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data, Verb,
+    AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, SendKeys_Data, Verb,
     WorkspaceCreate_Data,
 };
 use herdr_nexus_translator::server::{execute, Runtime};
@@ -215,7 +215,7 @@ fn production_execute_covers_every_external_verb_and_exact_argv() {
     assert_eq!(
         execute(
             &runtime,
-            &herdr(Verb::Keys(Keys_Data {
+            &herdr(Verb::SendKeys(SendKeys_Data {
                 pane_id: PaneId("w:p".into()),
                 keys: Keys(vec!["ctrl-c".into(), "x y".into()]),
             })),

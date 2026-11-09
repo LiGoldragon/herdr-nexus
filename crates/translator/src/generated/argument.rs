@@ -39,8 +39,8 @@ const _: () = {
 };
 #[rustfmt::skip]
 const _: () = {
-    fn assert_keys_data_arguable<T: Arguable>() {}
-    let _ = assert_keys_data_arguable::<emission_herdr_nexus::Keys_Data>;
+    fn assert_sendkeys_data_arguable<T: Arguable>() {}
+    let _ = assert_sendkeys_data_arguable::<emission_herdr_nexus::SendKeys_Data>;
 };
 #[rustfmt::skip]
 const _: () = {

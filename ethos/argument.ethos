@@ -1,5 +1,5 @@
 Library
-[ emission_herdr_nexus:[ WorkspaceCreate_Data AgentStart_Data AgentPrompt_Data Keys_Data ]
+[ emission_herdr_nexus:[ WorkspaceCreate_Data AgentStart_Data AgentPrompt_Data SendKeys_Data ]
   signal_herdr_nexus:[ PaneId ] ]                  ; imports: typed external command data
 [ PaneCloseArgument.PaneId                        ; types: the close argument is its pane
   ListArgument.[ Workspace Pane Agent ] ]          ; list commands are the three external collections
@@ -7,6 +7,6 @@ Library
 [ WorkspaceCreate_Data.[ Arguable ]                ; associations: every emitted external command is arguable
   AgentStart_Data.[ Arguable ]
   AgentPrompt_Data.[ Arguable ]
-  Keys_Data.[ Arguable ]
+  SendKeys_Data.[ Arguable ]
   PaneCloseArgument.[ Arguable ]
   ListArgument.[ Arguable ] ]

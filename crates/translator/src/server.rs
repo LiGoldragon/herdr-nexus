@@ -1,7 +1,7 @@
 use crate::runner::{self, Captured};
 use crate::generated::argument::{Arguable, ListArgument, PaneCloseArgument};
 use emission_herdr_nexus::{
-    AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, Keys_Data,
+    AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, SendKeys_Data,
     PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId, WorkspaceLabel,
     WorkspaceListing,
 };
@@ -827,7 +827,7 @@ pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
         Verb::WorkspaceList => execute_command(runtime, &herdr.session, &ListArgument::Workspace),
         Verb::AgentStart(command) => execute_command(runtime, &herdr.session, command),
         Verb::AgentPrompt(command) => execute_command(runtime, &herdr.session, command),
-        Verb::Keys(command) => execute_command(runtime, &herdr.session, command),
+        Verb::SendKeys(command) => execute_command(runtime, &herdr.session, command),
         Verb::PaneClose(pane_id) => execute_command(
             runtime,
             &herdr.session,
@@ -918,7 +918,7 @@ impl Arguable for AgentPrompt_Data {
     }
 }
 
-impl Arguable for Keys_Data {
+impl Arguable for SendKeys_Data {
     fn arguments(&self) -> Vec<String> {
         let mut arguments = vec![
             "pane".into(),
@@ -1008,7 +1008,7 @@ impl ExternalCommand for AgentPrompt_Data {
     }
 }
 
-impl ExternalCommand for Keys_Data {
+impl ExternalCommand for SendKeys_Data {
     fn response_id(&self) -> &'static str { "cli:pane:send-keys" }
     fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
         if stdout.is_empty() { ExternalOutcome::Done } else { ExternalOutcome::Uncertain }

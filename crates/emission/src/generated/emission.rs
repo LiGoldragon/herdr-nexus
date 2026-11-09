@@ -41,7 +41,7 @@ pub struct AgentPrompt_Data {
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "datom", derive(datom_codec::Datomizable, datom_codec::Composing))]
-pub struct Keys_Data {
+pub struct SendKeys_Data {
     pub pane_id: signal_herdr_nexus::PaneId,
     pub keys: signal_herdr_nexus::Keys,
 }
@@ -53,7 +53,7 @@ pub enum Verb {
     WorkspaceList,
     AgentStart(AgentStart_Data),
     AgentPrompt(AgentPrompt_Data),
-    Keys(Keys_Data),
+    SendKeys(SendKeys_Data),
     PaneClose(signal_herdr_nexus::PaneId),
     PaneList,
     AgentList,

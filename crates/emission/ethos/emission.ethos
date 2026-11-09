@@ -9,7 +9,7 @@ Signal
          WorkspaceList
          AgentStart.{ PaneId Command Timeout }
          AgentPrompt.{ PaneId Text }
-         Keys.{ PaneId Keys }
+         SendKeys.{ PaneId Keys }
          PaneClose.PaneId
          PaneList
          AgentList ]

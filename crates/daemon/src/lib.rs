@@ -507,7 +507,7 @@ impl Dispatcher {
         configuration: Arc<ReadyCoreConfiguration>,
     ) -> PublicDispatch {
         use emission_herdr_nexus::{
-            AgentPrompt_Data, AgentStart_Data, Herdr, Keys_Data, Verb, WorkspaceCreate_Data,
+            AgentPrompt_Data, AgentStart_Data, Herdr, SendKeys_Data, Verb, WorkspaceCreate_Data,
         };
         use herdr_nexus_core::generated::operation::Operation;
         use signal_herdr_nexus::Response;
@@ -631,7 +631,7 @@ impl Dispatcher {
                     &configuration,
                     Herdr {
                         session: press.pane.session.clone(),
-                        verb: Verb::Keys(Keys_Data {
+                        verb: Verb::SendKeys(SendKeys_Data {
                             pane_id: press.pane.pane_id.clone(),
                             keys: press.keys,
                         }),
