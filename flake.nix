@@ -22,11 +22,8 @@
         let
           context = base.lib.contexts.${system};
           pkgs = context.pkgs;
-          generated = import cargoNix {
-            inherit pkgs;
-            buildRustCrateForPkgs = context.buildRustCrateForPkgs;
-            defaultCrateOverrides = context.crateOverrides;
-          };
+          composed = base.lib.workspace.${system} { inherit cargoNix; };
+          generated = composed.workspace;
           # A member built with the features its binaries are written for.
           memberWith =
             name: features:
@@ -34,7 +31,7 @@
               packageId = generated.workspaceMembers.${name}.packageId;
               inherit features;
               runTests = false;
-              buildRustCrateForPkgsFunc = context.buildRustCrateForPkgs;
+              buildRustCrateForPkgsFunc = composed.buildRustCrateForPkgs;
             }).crates.${generated.workspaceMembers.${name}.packageId}.override
               { crateOverrides = context.crateOverrides; };
           daemon = memberWith "herdr-nexus-daemon" [ ];
