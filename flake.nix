@@ -4,7 +4,10 @@
   inputs = {
     base.url = "github:LiGoldragon/build-base";
     # The generator that regenerates each committed contract for its check.
-    ethos-zero.url = "github:LiGoldragon/ethos-zero";
+    ethos-zero = {
+      url = "github:LiGoldragon/ethos-zero";
+      inputs.base.follows = "base";
+    };
   };
 
   # Every crate, third-party or member, is one buildRustCrate derivation.
