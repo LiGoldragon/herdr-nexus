@@ -27,6 +27,8 @@ meta-signal-herdr-nexus.workspace = true
 shared-translator.workspace = true
 nix = { version = "0.30", features = ["socket"] }
 libc = "0.2"
+# The version set gives tokio one feature set; this lock carries the macros edge.
+tokio = { version = "1.53", default-features = false, features = ["macros"] }
 
 [lints.rust]
 unsafe_code = "forbid"

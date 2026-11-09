@@ -896,6 +896,12 @@ rec {
             usesDefaultFeatures = false;
           }
           {
+            name = "tokio";
+            packageId = "tokio";
+            usesDefaultFeatures = false;
+            features = [ "macros" ];
+          }
+          {
             name = "translator";
             packageId = "translator";
             rename = "shared-translator";
@@ -2095,6 +2101,11 @@ rec {
             name = "pin-project-lite";
             packageId = "pin-project-lite";
           }
+          {
+            name = "tokio-macros";
+            packageId = "tokio-macros";
+            optional = true;
+          }
         ];
         features = {
           "bytes" = [ "dep:bytes" ];
@@ -2117,7 +2128,34 @@ rec {
           "tracing" = [ "dep:tracing" ];
           "windows-sys" = [ "dep:windows-sys" ];
         };
-        resolvedDefaultFeatures = [ "bytes" "io-util" ];
+        resolvedDefaultFeatures = [ "bytes" "io-util" "macros" "tokio-macros" ];
+      };
+      "tokio-macros" = rec {
+        crateName = "tokio-macros";
+        version = "2.7.2";
+        edition = "2021";
+        sha256 = "03kvy2r5gr4zccm4vdx8vvv3q69kbjc1b006rs11aibz74m3lxvq";
+        procMacro = true;
+        libName = "tokio_macros";
+        authors = [
+          "Tokio Contributors <team@tokio.rs>"
+        ];
+        dependencies = [
+          {
+            name = "proc-macro2";
+            packageId = "proc-macro2";
+          }
+          {
+            name = "quote";
+            packageId = "quote";
+          }
+          {
+            name = "syn";
+            packageId = "syn 3.0.5";
+            features = [ "full" ];
+          }
+        ];
+
       };
       "translator" = rec {
         crateName = "translator";
