@@ -325,13 +325,13 @@ rec {
       };
       "datom-codec" = rec {
         crateName = "datom-codec";
-        version = "0.33.0";
+        version = "0.33.1";
         edition = "2024";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "eabead48b31e8d4f429d7fb156dd18548bbd79c1";
-          sha256 = "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         libName = "datom_codec";
         dependencies = [
@@ -364,8 +364,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/datom-codec";
-          rev = "eabead48b31e8d4f429d7fb156dd18548bbd79c1";
-          sha256 = "1p2qa5jkrmq9nlc9cl89vc8s4zp29rvabfq2jyb1x4mh9biphvjg";
+          rev = "09a0526949b043f921b6d3ce115b7f455291f2e2";
+          sha256 = "18cplyk9f5nrqs35fgqpimfi507l38qvkmkx3z2qm2vwi1rlii2d";
         };
         procMacro = true;
         libName = "datom_codec_derive";
@@ -475,14 +475,14 @@ rec {
       };
       "ethos-zero" = rec {
         crateName = "ethos-zero";
-        version = "19.2.0";
+        version = "22.0.0";
         edition = "2024";
         crateBin = [];
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/ethos-zero";
-          rev = "5a5daca315ab24460ccbcd5038130c453e853e6e";
-          sha256 = "0n9wvmghq0zaqa86xib2bc6q4nis6f0rmcbgb6xdas5dhlm3nnak";
+          rev = "1976e45fe1edfd5676cb33919dba1ec20c785a02";
+          sha256 = "12b6np5n8knlpv2rb98g0m04n6xxaprd8n5hy4wgw658h5vg216j";
         };
         libName = "ethos_zero";
         dependencies = [
@@ -1055,13 +1055,13 @@ rec {
       };
       "meta-signal-herdr-nexus" = rec {
         crateName = "meta-signal-herdr-nexus";
-        version = "0.2.1";
+        version = "0.3.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-herdr-nexus";
-          rev = "5b89490efd0b28fc00bbda49cff5314d3bea8762";
-          sha256 = "0gq45yk7l43mzw60n37215nr93friizdz8mzwkz8j48xm21n3gr7";
+          rev = "41f8960df881cce3eb0e7ee7a8b2895f547efee2";
+          sha256 = "0kb02zx1p06azxdyavzafckxczvmdii13jyz84z4c94l131f23r4";
         };
         libName = "meta_signal_herdr_nexus";
         dependencies = [
@@ -1289,8 +1289,8 @@ rec {
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/protos";
-          rev = "3c7ade34010cec6cec153ae694ee335f7fea0193";
-          sha256 = "1crw7gc7b870xxk9pavzfpyav44163izylndfr8affbsm6hd863s";
+          rev = "c93b598025984f8a73e70aa18b8e8a6fdfdfdfd8";
+          sha256 = "00rwpzkxqmwhmxr2dkv9ay9wfvjxbprvvv23lfxmqamm2264r2gb";
         };
         dependencies = [
           {
@@ -1818,14 +1818,14 @@ rec {
       };
       "signal" = rec {
         crateName = "signal";
-        version = "10.3.0";
+        version = "10.4.1";
         edition = "2024";
         links = "signal";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal";
-          rev = "7afb68bcd19ce774f47d11c5e69f6e10054f78de";
-          sha256 = "0yyv9bylafhnpas51gz8ppmvv0r77rmfjc0yslkjk7f82rijvrm3";
+          rev = "d77169d061d0d0d7913415257d0f1c1603260583";
+          sha256 = "1rmh26a9qp0j80r5d733kw9s6gfdj6sd8y14vhphqfpvssa079ah";
         };
         dependencies = [
           {
@@ -1867,13 +1867,13 @@ rec {
       };
       "signal-herdr-nexus" = rec {
         crateName = "signal-herdr-nexus";
-        version = "0.2.0";
+        version = "0.3.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-herdr-nexus";
-          rev = "7c724f8d557b9ce8c5ee36a447dbd882aa623187";
-          sha256 = "10wrinb1hpd2czishy6bmg328f3chdgh7mjw9rzx92rx4c5kzf31";
+          rev = "b9fff75207a9c5acd13e7bb663a9840a519e53f5";
+          sha256 = "171z8z1vkhvj6ybzfi2rwcsypkpg7zbhsz4lp7gf20k6qfybd15j";
         };
         libName = "signal_herdr_nexus";
         dependencies = [
@@ -2159,13 +2159,13 @@ rec {
       };
       "translator" = rec {
         crateName = "translator";
-        version = "0.3.1";
+        version = "0.4.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "1b0e38bb9f870855f9d0ff99eb80725ad79f8b9f";
-          sha256 = "1nx83k1nlhhw6i7krsxqc8jybk48kcysjap9v7yp9b4pccmccdcv";
+          rev = "ec95102d8e65a5c195fd070e0421574eff97d020";
+          sha256 = "1rscc9j2na45scyvyscy8bn399b69swjfdzbs7nn9fhcg0bif2nc";
         };
         dependencies = [
           {

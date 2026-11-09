@@ -17,8 +17,8 @@ datom = [
 ]
 
 [dependencies]
-datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "eabead4", optional = true }
-protos = { git = "https://github.com/LiGoldragon/protos", rev = "3c7ade3", optional = true }
+datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
+protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
 rkyv = { version = "0.8", default-features = false, features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
 signal = { workspace = true }
 signal-herdr-nexus = { workspace = true }

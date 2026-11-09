@@ -75,8 +75,8 @@ dependencies = [
 
 [[package]]
 name = "datom-codec"
-version = "0.33.0"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#eabead48b31e8d4f429d7fb156dd18548bbd79c1"
+version = "0.33.1"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#09a0526949b043f921b6d3ce115b7f455291f2e2"
 dependencies = [
  "datom-codec-derive",
  "protos",
@@ -86,7 +86,7 @@ dependencies = [
 [[package]]
 name = "datom-codec-derive"
 version = "0.32.3"
-source = "git+https://github.com/LiGoldragon/datom-codec?rev=eabead4#eabead48b31e8d4f429d7fb156dd18548bbd79c1"
+source = "git+https://github.com/LiGoldragon/datom-codec?rev=09a0526#09a0526949b043f921b6d3ce115b7f455291f2e2"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -122,8 +122,8 @@ dependencies = [
 
 [[package]]
 name = "ethos-zero"
-version = "19.2.0"
-source = "git+https://github.com/LiGoldragon/ethos-zero?rev=5a5daca#5a5daca315ab24460ccbcd5038130c453e853e6e"
+version = "22.0.0"
+source = "git+https://github.com/LiGoldragon/ethos-zero?rev=1976e45#1976e45fe1edfd5676cb33919dba1ec20c785a02"
 dependencies = [
  "datom-codec",
  "prettyplease",
@@ -286,8 +286,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-herdr-nexus"
-version = "0.2.1"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=5b89490#5b89490efd0b28fc00bbda49cff5314d3bea8762"
+version = "0.3.1"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=41f8960#41f8960df881cce3eb0e7ee7a8b2895f547efee2"
 dependencies = [
  "datom-codec",
  "protos",
@@ -363,7 +363,7 @@ dependencies = [
 [[package]]
 name = "protos"
 version = "0.33.0"
-source = "git+https://github.com/LiGoldragon/protos?rev=3c7ade3#3c7ade34010cec6cec153ae694ee335f7fea0193"
+source = "git+https://github.com/LiGoldragon/protos?rev=c93b598#c93b598025984f8a73e70aa18b8e8a6fdfdfdfd8"
 dependencies = [
  "rkyv",
 ]
@@ -509,8 +509,8 @@ dependencies = [
 
 [[package]]
 name = "signal"
-version = "10.3.0"
-source = "git+https://github.com/LiGoldragon/signal?rev=7afb68b#7afb68bcd19ce774f47d11c5e69f6e10054f78de"
+version = "10.4.1"
+source = "git+https://github.com/LiGoldragon/signal?rev=d77169d#d77169d061d0d0d7913415257d0f1c1603260583"
 dependencies = [
  "ethos-zero",
  "rkyv",
@@ -520,8 +520,8 @@ dependencies = [
 
 [[package]]
 name = "signal-herdr-nexus"
-version = "0.2.0"
-source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=7c724f8#7c724f8d557b9ce8c5ee36a447dbd882aa623187"
+version = "0.3.1"
+source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=b9fff75#b9fff75207a9c5acd13e7bb663a9840a519e53f5"
 dependencies = [
  "datom-codec",
  "protos",
@@ -622,8 +622,8 @@ dependencies = [
 
 [[package]]
 name = "translator"
-version = "0.3.1"
-source = "git+https://github.com/LiGoldragon/translator?rev=1b0e38b#1b0e38bb9f870855f9d0ff99eb80725ad79f8b9f"
+version = "0.4.1"
+source = "git+https://github.com/LiGoldragon/translator?rev=ec95102#ec95102d8e65a5c195fd070e0421574eff97d020"
 dependencies = [
  "datom-codec",
  "libc",
