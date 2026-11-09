@@ -1055,13 +1055,13 @@ rec {
       };
       "meta-signal-herdr-nexus" = rec {
         crateName = "meta-signal-herdr-nexus";
-        version = "0.3.1";
+        version = "0.3.3";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-herdr-nexus";
-          rev = "41f8960df881cce3eb0e7ee7a8b2895f547efee2";
-          sha256 = "0kb02zx1p06azxdyavzafckxczvmdii13jyz84z4c94l131f23r4";
+          rev = "c8edfb46e8fa42340da9461dbfaa81a78b43c899";
+          sha256 = "15qiiln9qs6fn7jc267fvm0186v228k4994m21012h1apq5yi8k4";
         };
         libName = "meta_signal_herdr_nexus";
         dependencies = [
@@ -1829,6 +1829,16 @@ rec {
         };
         dependencies = [
           {
+            name = "datom-codec";
+            packageId = "datom-codec";
+            optional = true;
+          }
+          {
+            name = "protos";
+            packageId = "protos";
+            optional = true;
+          }
+          {
             name = "rkyv";
             packageId = "rkyv";
             usesDefaultFeatures = false;
@@ -1863,17 +1873,17 @@ rec {
           "datom" = [ "dep:datom-codec" "dep:protos" ];
           "transport" = [ "dep:tokio" ];
         };
-        resolvedDefaultFeatures = [ "default" "transport" ];
+        resolvedDefaultFeatures = [ "datom" "default" "transport" ];
       };
       "signal-herdr-nexus" = rec {
         crateName = "signal-herdr-nexus";
-        version = "0.3.1";
+        version = "0.3.2";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-herdr-nexus";
-          rev = "b9fff75207a9c5acd13e7bb663a9840a519e53f5";
-          sha256 = "171z8z1vkhvj6ybzfi2rwcsypkpg7zbhsz4lp7gf20k6qfybd15j";
+          rev = "10de08fe9951417f1c671e5d2da03017001ed317";
+          sha256 = "0hc97b1xgyda7np7ny0gdjgs4jhas2cfm7gj90q6yqa0x42bwnzb";
         };
         libName = "signal_herdr_nexus";
         dependencies = [
@@ -1900,7 +1910,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" ];
         };
         resolvedDefaultFeatures = [ "datom" "default" ];
       };
@@ -2159,13 +2169,13 @@ rec {
       };
       "translator" = rec {
         crateName = "translator";
-        version = "0.4.1";
+        version = "0.4.2";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "ec95102d8e65a5c195fd070e0421574eff97d020";
-          sha256 = "1rscc9j2na45scyvyscy8bn399b69swjfdzbs7nn9fhcg0bif2nc";
+          rev = "27da70fda647d78655d755477913a47267eb9c62";
+          sha256 = "0xs4ni7zskajcfbmszdxqqkwjymnsvvdydx2higrdgwlyq6pk3sc";
         };
         dependencies = [
           {
@@ -2208,7 +2218,7 @@ rec {
           }
         ];
         features = {
-          "datom" = [ "dep:datom-codec" "dep:protos" ];
+          "datom" = [ "dep:datom-codec" "dep:protos" "signal/datom" ];
           "text" = [ "datom" ];
           "unix" = [ "dep:libc" "dep:nix" ];
         };
