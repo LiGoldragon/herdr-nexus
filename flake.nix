@@ -33,6 +33,7 @@
             (generated.internal.builtRustCratesWithFeatures {
               packageId = generated.workspaceMembers.${name}.packageId;
               inherit features;
+              runTests = false;
               buildRustCrateForPkgsFunc = context.buildRustCrateForPkgs;
             }).crates.${generated.workspaceMembers.${name}.packageId}.override
               { crateOverrides = context.crateOverrides; };
