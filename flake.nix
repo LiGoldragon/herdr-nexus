@@ -2,176 +2,131 @@
   description = "herdr Nexus v1 — typed core, daemon, and external translator";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    flake-utils.url = "github:numtide/flake-utils";
-    rust-build = {
-      url = "github:LiGoldragon/rust-build";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    base.url = "github:LiGoldragon/build-base";
+    # The generator that regenerates each committed contract for its check.
     ethos-zero.url = "github:LiGoldragon/ethos-zero";
   };
 
-  outputs = { self, nixpkgs, flake-utils, rust-build, ethos-zero }:
-    flake-utils.lib.eachDefaultSystem (system:
-      let
-        pkgs = import nixpkgs { inherit system; };
-        rust = rust-build.lib.${system}.fromPkgs pkgs;
-        source = rust.cleanSource {
-          root = ./.;
-          extraFilters = [
-            (path: type: type == "regular" && pkgs.lib.hasSuffix ".ethos" (toString path))
-          ];
-        };
-        cargoArtifacts = rust.craneLib.buildDepsOnly {
-          src = source;
-          cargoExtraArgs = "--workspace --all-features";
-        };
-      in {
-        packages = rec {
-        daemon = rust.craneLib.buildPackage {
-          pname = "herdr-nexus-daemon";
-          version = "0.1.0";
-          src = source;
-          inherit cargoArtifacts;
-          cargoExtraArgs = "-p herdr-nexus-daemon --bin herdr-nexus-daemon --no-default-features";
-        };
-        translator = rust.craneLib.buildPackage {
-          pname = "herdr-translator";
-          version = "0.1.0";
-          src = source;
-          inherit cargoArtifacts;
-          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-translator";
-        };
-        cli = rust.craneLib.buildPackage {
-          pname = "herdr-nexus-cli";
-          version = "0.1.0";
-          src = source;
-          inherit cargoArtifacts;
-          cargoExtraArgs = "-p herdr-nexus-translator --features text --bin herdr-nexus --bin herdr-nexus-meta --bin herdr-nexus-place --bin herdr-pair";
-          postInstall = ''
-            mkdir -p "$out/libexec"
-            mv "$out/bin/herdr-pair" "$out/libexec/herdr-pair-launcher"
-          '';
-        };
-        pair = pkgs.writeShellScriptBin "herdr-pair" ''
-          if [[ $# -ne 1 ]]; then
-            echo "usage: herdr-pair '<Place>'" >&2
-            exit 64
-          fi
-          exec ${cli}/libexec/herdr-pair-launcher "$1" \
-            ${daemon}/bin/herdr-nexus-daemon \
-            ${translator}/bin/herdr-translator \
-            70000 8388608 25 1048576 64
-        '';
-        default = pkgs.symlinkJoin {
-          name = "herdr-nexus-v1";
-          paths = [ daemon translator cli pair ];
-        };
-        };
-        checks = rec {
-          test = rust.craneLib.cargoTest {
-            pname = "herdr-nexus-test";
-            version = "0.1.0";
-            src = source;
-            inherit cargoArtifacts;
-            cargoTestExtraArgs = "--workspace --all-features";
+  # Every crate, third-party or member, is one buildRustCrate derivation.
+  # Cargo.nix is generated from Cargo.lock by the build base's crate2nix and
+  # committed, so evaluation imports no derivation. After editing a
+  # Cargo.toml or Cargo.lock:
+  #   nix run github:LiGoldragon/build-base#crate2nix -- generate
+  outputs =
+    { self, base, ethos-zero }:
+    let
+      lib = base.inputs.nixpkgs.lib;
+      cargoNix = ./Cargo.nix;
+      workspaces = lib.genAttrs base.lib.systems (
+        system:
+        let
+          context = base.lib.contexts.${system};
+          pkgs = context.pkgs;
+          generated = import cargoNix {
+            inherit pkgs;
+            buildRustCrateForPkgs = context.buildRustCrateForPkgs;
+            defaultCrateOverrides = context.crateOverrides;
           };
-          operation-generated = pkgs.runCommand "herdr-operation-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/operation.ethos;
-            committed = ./crates/core/src/generated/operation.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          memory-generated = pkgs.runCommand "herdr-memory-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/memory.ethos;
-            committed = ./crates/core/src/generated/memory.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          emission-generated = pkgs.runCommand "herdr-emission-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./crates/emission/ethos/emission.ethos;
-            committed = ./crates/emission/src/generated/emission.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          argument-generated = pkgs.runCommand "herdr-argument-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/argument.ethos;
-            committed = ./crates/translator/src/generated/argument.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          transport-generated = pkgs.runCommand "herdr-transport-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/transport.ethos;
-            committed = ./crates/wire/src/transport_types.rs;
-            normalization = "transport";
-          } (builtins.readFile ./checks/generated-contract-normalized.sh);
-          public-call-generated = pkgs.runCommand "herdr-public-call-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/public-call.ethos;
-            committed = ./crates/wire/src/public_call.rs;
-            normalization = "public-call";
-          } (builtins.readFile ./checks/generated-contract-normalized.sh);
-          public-payload-generated = pkgs.runCommand "herdr-public-payload-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/public-payload.ethos;
-            committed = ./crates/wire/src/public_payload.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          meta-call-generated = pkgs.runCommand "herdr-meta-call-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/meta-call.ethos;
-            committed = ./crates/wire/src/meta_call.rs;
-            normalization = "meta-call";
-          } (builtins.readFile ./checks/generated-contract-normalized.sh);
-          meta-payload-generated = pkgs.runCommand "herdr-meta-payload-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./ethos/meta-payload.ethos;
-            committed = ./crates/wire/src/meta_payload.rs;
-          } (builtins.readFile ./checks/generated-contract.sh);
-          core-meta-generated = pkgs.runCommand "herdr-core-meta-generated" {
-            generator = ethos-zero.packages.${system}.default;
-            declaration = ./crates/core-meta/ethos/core-meta.ethos;
-            committed = ./crates/core-meta/src/lib.rs;
-            normalization = "core-meta";
-          } (builtins.readFile ./checks/generated-contract-normalized.sh);
-          generated = pkgs.runCommand "herdr-generated-contracts" {
-            contracts = [
-              operation-generated memory-generated emission-generated argument-generated
-              transport-generated public-call-generated public-payload-generated
-              meta-call-generated meta-payload-generated core-meta-generated
-            ];
-          } ''
-            for contract in $contracts; do test -e "$contract"; done
-            touch "$out"
+          # A member built with the features its binaries are written for.
+          memberWith =
+            name: features:
+            (generated.internal.builtRustCratesWithFeatures {
+              packageId = generated.workspaceMembers.${name}.packageId;
+              inherit features;
+              buildRustCrateForPkgsFunc = context.buildRustCrateForPkgs;
+            }).crates.${generated.workspaceMembers.${name}.packageId}.override
+              { crateOverrides = context.crateOverrides; };
+          daemon = memberWith "herdr-nexus-daemon" [ ];
+          translator = memberWith "herdr-nexus-translator" [ "default" "text" ];
+          cli = pkgs.runCommand "herdr-nexus-cli" { } ''
+            mkdir -p "$out/bin" "$out/libexec"
+            for executable in herdr-nexus herdr-nexus-meta herdr-nexus-place; do
+              cp ${translator}/bin/$executable "$out/bin/$executable"
+            done
+            cp ${translator}/bin/herdr-pair "$out/libexec/herdr-pair-launcher"
           '';
-          paired-relaunch = pkgs.runCommand "herdr-paired-relaunch" {
-            package = self.packages.${system}.default;
-            script = ./checks/paired-relaunch.sh;
-          } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
-            touch "$out"
+          pair = pkgs.writeShellScriptBin "herdr-pair" ''
+            if [[ $# -ne 1 ]]; then
+              echo "usage: herdr-pair '<Place>'" >&2
+              exit 64
+            fi
+            exec ${cli}/libexec/herdr-pair-launcher "$1" \
+              ${daemon}/bin/herdr-nexus-daemon \
+              ${translator}/bin/herdr-translator \
+              70000 8388608 25 1048576 64
           '';
-          place-preparation = pkgs.runCommand "herdr-place-preparation" {
-            package = self.packages.${system}.default;
-            script = ./checks/place-preparation.sh;
-          } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
-            touch "$out"
-          '';
-          delayed-start = pkgs.runCommand "herdr-delayed-start" {
-            package = self.packages.${system}.default;
-            script = ./checks/delayed-start.sh;
-          } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
-            touch "$out"
-          '';
-          meta-connection-isolation = pkgs.runCommand "herdr-meta-connection-isolation" {
-            package = self.packages.${system}.default;
-            script = ./checks/meta-connection-isolation.sh;
-            nativeBuildInputs = [ pkgs.python3 ];
-          } ''
-            ${pkgs.bash}/bin/bash "$script" "$package"
-            touch "$out"
-          '';
-        };
-        devShells.default = pkgs.mkShell {
-          packages = [ rust.toolchain ];
-        };
-      });
+          default = pkgs.symlinkJoin {
+            name = "herdr-nexus-v1";
+            paths = [ daemon translator cli pair ];
+          };
+        in
+        {
+          packages = { inherit daemon translator cli pair default; };
+          inherit generated;
+        }
+      );
+      workspace = base.lib.workspaceOutputs {
+        inherit cargoNix;
+        extraChecks =
+          { pkgs, ... }:
+          let
+            package = (workspaces.${pkgs.stdenv.hostPlatform.system}).packages.default;
+            generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
+            contract =
+              { name, declaration, committed, normalization ? null }:
+              pkgs.runCommand "herdr-${name}-generated"
+                (
+                  {
+                    inherit generator declaration committed;
+                  }
+                  // lib.optionalAttrs (normalization != null) { inherit normalization; }
+                )
+                (builtins.readFile (
+                  if normalization == null then ./checks/generated-contract.sh
+                  else ./checks/generated-contract-normalized.sh
+                ));
+            contracts = {
+              operation-generated = { name = "operation"; declaration = ./ethos/operation.ethos; committed = ./crates/core/src/generated/operation.rs; };
+              memory-generated = { name = "memory"; declaration = ./ethos/memory.ethos; committed = ./crates/core/src/generated/memory.rs; };
+              emission-generated = { name = "emission"; declaration = ./crates/emission/ethos/emission.ethos; committed = ./crates/emission/src/generated/emission.rs; };
+              argument-generated = { name = "argument"; declaration = ./ethos/argument.ethos; committed = ./crates/translator/src/generated/argument.rs; };
+              transport-generated = { name = "transport"; declaration = ./ethos/transport.ethos; committed = ./crates/wire/src/transport_types.rs; normalization = "transport"; };
+              public-call-generated = { name = "public-call"; declaration = ./ethos/public-call.ethos; committed = ./crates/wire/src/public_call.rs; normalization = "public-call"; };
+              public-payload-generated = { name = "public-payload"; declaration = ./ethos/public-payload.ethos; committed = ./crates/wire/src/public_payload.rs; };
+              meta-call-generated = { name = "meta-call"; declaration = ./ethos/meta-call.ethos; committed = ./crates/wire/src/meta_call.rs; normalization = "meta-call"; };
+              meta-payload-generated = { name = "meta-payload"; declaration = ./ethos/meta-payload.ethos; committed = ./crates/wire/src/meta_payload.rs; };
+              core-meta-generated = { name = "core-meta"; declaration = ./crates/core-meta/ethos/core-meta.ethos; committed = ./crates/core-meta/src/lib.rs; normalization = "core-meta"; };
+            };
+            checked = lib.mapAttrs (_: contract) contracts;
+            script =
+              name: extra:
+              pkgs.runCommand "herdr-${name}"
+                ({
+                  inherit package;
+                  script = ./checks/${name}.sh;
+                } // extra)
+                ''
+                  ${pkgs.bash}/bin/bash "$script" "$package"
+                  touch "$out"
+                '';
+          in
+          checked
+          // {
+            generated = pkgs.runCommand "herdr-generated-contracts" {
+              contracts = lib.attrValues checked;
+            } ''
+              for contract in $contracts; do test -e "$contract"; done
+              touch "$out"
+            '';
+            paired-relaunch = script "paired-relaunch" { };
+            place-preparation = script "place-preparation" { };
+            delayed-start = script "delayed-start" { };
+            meta-connection-isolation = script "meta-connection-isolation" { nativeBuildInputs = [ pkgs.python3 ]; };
+          };
+      };
+    in
+    {
+      packages = lib.mapAttrs (system: built: workspace.packages.${system} // built.packages) workspaces;
+      inherit (workspace) checks devShells;
+    };
 }
