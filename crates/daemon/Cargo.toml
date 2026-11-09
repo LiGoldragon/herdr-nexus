@@ -12,7 +12,7 @@ core-meta-herdr-nexus = { path = "../core-meta" }
 herdr-nexus-wire = { path = "../wire" }
 signal-herdr-nexus.workspace = true
 meta-signal-herdr-nexus.workspace = true
-signal = { workspace = true, features = ["transport"] }
+signal.workspace = true
 shared-translator.workspace = true
 nix = { version = "0.30", features = ["fs", "poll", "user"] }
 rustix = { version = "1", features = ["event", "process"] }

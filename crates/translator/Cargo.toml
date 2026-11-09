@@ -13,18 +13,18 @@ core-meta-herdr-nexus = { path = "../core-meta" }
 nix = { version = "0.30", features = ["fs", "poll", "process", "signal", "socket", "user"] }
 rustix = { version = "1", features = ["process", "rand"] }
 rkyv = { version = "0.8", features = ["std", "bytecheck", "little_endian", "pointer_width_32", "unaligned"] }
-signal = { git = "https://github.com/LiGoldragon/signal", rev = "d77169d" }
+signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74" }
 protos = { git = "https://github.com/LiGoldragon/protos", rev = "c93b598", optional = true }
 datom-codec = { git = "https://github.com/LiGoldragon/datom-codec", rev = "09a0526", optional = true }
 
 [dependencies.signal-herdr-nexus]
 git = "https://github.com/LiGoldragon/signal-herdr-nexus"
-rev = "10de08f"
+rev = "10b9d21"
 
 [dependencies.shared-translator]
 package = "translator"
 git = "https://github.com/LiGoldragon/translator"
-rev = "27da70f"
+rev = "abc89b9"
 features = ["unix"]
 
 
@@ -40,7 +40,7 @@ path = "../emission"
 [dependencies.meta-signal-herdr-nexus]
 package = "meta-signal-herdr-nexus"
 git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus"
-rev = "c8edfb4"
+rev = "d00ae37"
 features = ["datom"]
 
 [[bin]]

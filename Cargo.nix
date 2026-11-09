@@ -253,7 +253,7 @@ rec {
           "extra-platforms" = [ "dep:extra-platforms" ];
           "serde" = [ "dep:serde" ];
         };
-        resolvedDefaultFeatures = [ "default" "std" ];
+        resolvedDefaultFeatures = [ "std" ];
       };
       "cfg-if" = rec {
         crateName = "cfg-if";
@@ -717,7 +717,6 @@ rec {
             name = "signal";
             packageId = "signal";
             usesDefaultFeatures = false;
-            features = [ "transport" ];
           }
           {
             name = "signal-herdr-nexus";
@@ -1055,13 +1054,13 @@ rec {
       };
       "meta-signal-herdr-nexus" = rec {
         crateName = "meta-signal-herdr-nexus";
-        version = "0.3.3";
+        version = "0.4.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-herdr-nexus";
-          rev = "c8edfb46e8fa42340da9461dbfaa81a78b43c899";
-          sha256 = "15qiiln9qs6fn7jc267fvm0186v228k4994m21012h1apq5yi8k4";
+          rev = "d00ae37f72032d787c03392eef6e972ff4bae57a";
+          sha256 = "0lh1myp9x9d1dhv1zlfh4ypgr3qd7ayq6ndy3xxq54zwigzsf7s0";
         };
         libName = "meta_signal_herdr_nexus";
         dependencies = [
@@ -1818,14 +1817,14 @@ rec {
       };
       "signal" = rec {
         crateName = "signal";
-        version = "10.4.1";
+        version = "11.0.0";
         edition = "2024";
         links = "signal";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal";
-          rev = "d77169d061d0d0d7913415257d0f1c1603260583";
-          sha256 = "1rmh26a9qp0j80r5d733kw9s6gfdj6sd8y14vhphqfpvssa079ah";
+          rev = "6d4eb74a238ea4a6149bd12c42a8c06aec01b154";
+          sha256 = "0hqy8k58s6sc9wz76k8iq40bv636js5s951zgd01ncrxcy6h776a";
         };
         dependencies = [
           {
@@ -1848,13 +1847,6 @@ rec {
             name = "thiserror";
             packageId = "thiserror";
           }
-          {
-            name = "tokio";
-            packageId = "tokio";
-            optional = true;
-            usesDefaultFeatures = false;
-            features = [ "io-util" ];
-          }
         ];
         buildDependencies = [
           {
@@ -1862,28 +1854,20 @@ rec {
             packageId = "ethos-zero";
           }
         ];
-        devDependencies = [
-          {
-            name = "tokio";
-            packageId = "tokio";
-            features = [ "io-util" "macros" "rt" ];
-          }
-        ];
         features = {
           "datom" = [ "dep:datom-codec" "dep:protos" ];
-          "transport" = [ "dep:tokio" ];
         };
-        resolvedDefaultFeatures = [ "datom" "default" "transport" ];
+        resolvedDefaultFeatures = [ "datom" "default" ];
       };
       "signal-herdr-nexus" = rec {
         crateName = "signal-herdr-nexus";
-        version = "0.3.2";
+        version = "0.4.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-herdr-nexus";
-          rev = "10de08fe9951417f1c671e5d2da03017001ed317";
-          sha256 = "0hc97b1xgyda7np7ny0gdjgs4jhas2cfm7gj90q6yqa0x42bwnzb";
+          rev = "10b9d215097504d5c911bb491ef8a5f276a3c683";
+          sha256 = "12fvhvyh0zaaf135pr7vm71alcyvv7fbdxp1ig5cr0r3c3nap8ck";
         };
         libName = "signal_herdr_nexus";
         dependencies = [
@@ -2103,11 +2087,6 @@ rec {
         ];
         dependencies = [
           {
-            name = "bytes";
-            packageId = "bytes";
-            optional = true;
-          }
-          {
             name = "pin-project-lite";
             packageId = "pin-project-lite";
           }
@@ -2138,7 +2117,7 @@ rec {
           "tracing" = [ "dep:tracing" ];
           "windows-sys" = [ "dep:windows-sys" ];
         };
-        resolvedDefaultFeatures = [ "bytes" "io-util" "macros" "tokio-macros" ];
+        resolvedDefaultFeatures = [ "macros" "tokio-macros" ];
       };
       "tokio-macros" = rec {
         crateName = "tokio-macros";
@@ -2169,13 +2148,13 @@ rec {
       };
       "translator" = rec {
         crateName = "translator";
-        version = "0.4.2";
+        version = "0.5.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/translator";
-          rev = "27da70fda647d78655d755477913a47267eb9c62";
-          sha256 = "0xs4ni7zskajcfbmszdxqqkwjymnsvvdydx2higrdgwlyq6pk3sc";
+          rev = "abc89b9cc7469a35700cb222ba31a8f5cb0745e6";
+          sha256 = "1907l121f2i6qvfimxn5n2vp2wbhsb3rwfwm82x2x0vlfyfdgp1z";
         };
         dependencies = [
           {

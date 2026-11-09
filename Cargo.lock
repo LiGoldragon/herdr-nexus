@@ -286,8 +286,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-herdr-nexus"
-version = "0.3.3"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=c8edfb4#c8edfb46e8fa42340da9461dbfaa81a78b43c899"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=d00ae37#d00ae37f72032d787c03392eef6e972ff4bae57a"
 dependencies = [
  "datom-codec",
  "protos",
@@ -509,21 +509,20 @@ dependencies = [
 
 [[package]]
 name = "signal"
-version = "10.4.1"
-source = "git+https://github.com/LiGoldragon/signal?rev=d77169d#d77169d061d0d0d7913415257d0f1c1603260583"
+version = "11.0.0"
+source = "git+https://github.com/LiGoldragon/signal?rev=6d4eb74#6d4eb74a238ea4a6149bd12c42a8c06aec01b154"
 dependencies = [
  "datom-codec",
  "ethos-zero",
  "protos",
  "rkyv",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
 name = "signal-herdr-nexus"
-version = "0.3.2"
-source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=10de08f#10de08fe9951417f1c671e5d2da03017001ed317"
+version = "0.4.0"
+source = "git+https://github.com/LiGoldragon/signal-herdr-nexus?rev=10b9d21#10b9d215097504d5c911bb491ef8a5f276a3c683"
 dependencies = [
  "datom-codec",
  "protos",
@@ -606,7 +605,6 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
- "bytes",
  "pin-project-lite",
  "tokio-macros",
 ]
@@ -624,8 +622,8 @@ dependencies = [
 
 [[package]]
 name = "translator"
-version = "0.4.2"
-source = "git+https://github.com/LiGoldragon/translator?rev=27da70f#27da70fda647d78655d755477913a47267eb9c62"
+version = "0.5.0"
+source = "git+https://github.com/LiGoldragon/translator?rev=abc89b9#abc89b9cc7469a35700cb222ba31a8f5cb0745e6"
 dependencies = [
  "datom-codec",
  "libc",
