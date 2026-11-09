@@ -75,38 +75,14 @@
         # The tests are written for every feature on, as `cargo test
         # --workspace --all-features` ran them.
         memberChecks =
-          { pkgs, workspace, buildRustCrateForPkgs, crateOverrides, ... }:
+          { pkgs, workspace, check, ... }:
           lib.mapAttrs (
             name: member:
             let
               packageId = member.packageId;
               features = lib.attrNames (workspace.internal.crates.${packageId}.features or { });
-              tests =
-                (workspace.internal.builtRustCratesWithFeatures {
-                  inherit packageId features;
-                  runTests = true;
-                  buildRustCrateForPkgsFunc =
-                    p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
-                }).crates.${packageId}.override
-                  {
-                    buildTests = true;
-                    crateOverrides = crateOverrides // {
-                      ${name} =
-                        attributes:
-                        let
-                          given = (crateOverrides.${name} or (_: { })) attributes;
-                        in
-                        given
-                        // {
-                          preBuild = (given.preBuild or "") + ''
-                            export CARGO_TARGET_TMPDIR="$PWD/target/tmp"
-                          '';
-                          postInstall = (given.postInstall or "") + ''
-                            echo "$CARGO_TARGET_TMPDIR" > $out/target-tmpdir
-                          '';
-                        };
-                    };
-                  };
+              # The base's own test build, so its dependencies are the base's derivations.
+              tests = (check name features).tests;
             in
             pkgs.runCommand "check-${name}" { passthru = { inherit tests; }; } ''
               cp -r ${tests.src} "$NIX_BUILD_TOP/source"
