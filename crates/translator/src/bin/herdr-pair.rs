@@ -106,7 +106,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 place: place.clone(),
                 admission: admission.clone(),
                 peer_identity: PeerIdentity {
-                    user_id: user_id.clone(),
+                    user_id,
                     process_id: translator_pid,
                 },
                 instance_id,

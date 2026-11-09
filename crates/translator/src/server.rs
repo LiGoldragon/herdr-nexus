@@ -11,15 +11,13 @@ use shared_translator::{ByteViewable, FrameCapacity, Restorable, Signal, Signali
 use signal_herdr_nexus::{
     AgentKind, ErrorCode, Executable, ExitStatus, Message, Pane, PaneId, Refusal, Session, State,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-
-const MAXIMUM_SIGNAL_BYTES: usize = signal::MAXIMUM_SIGNAL_BYTES;
 
 #[derive(Clone, Copy)]
 pub enum Endpoint {
@@ -617,7 +615,7 @@ fn forward_public_stream(
     progress_timeout: Duration,
     admission_limit: usize,
 ) -> Result<(), ServerError> {
-    use shared_translator::{FrameReading, FrameWriting};
+    use shared_translator::FrameWriting;
     let request =
         herdr_nexus_wire::public_call::Query::Call(herdr_nexus_wire::public_call::Call_Data {
             caller,
@@ -1409,7 +1407,9 @@ impl std::error::Error for ServerError {}
 
 #[cfg(test)]
 mod tests {
+    const MAXIMUM_SIGNAL_BYTES: usize = signal::MAXIMUM_SIGNAL_BYTES;
     use super::*;
+    use std::collections::HashMap;
 
     fn meta_request(
         configuration: &TranslatorConfiguration,

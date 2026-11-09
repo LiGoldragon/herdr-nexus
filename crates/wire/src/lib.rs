@@ -2,8 +2,10 @@
 
 pub mod frame;
 pub mod deadline;
+#[allow(unused_imports)] // the generated module imports the transport types it may not use
 pub mod meta_call;
 pub mod meta_payload;
+#[allow(unused_imports)] // the generated module imports the transport types it may not use
 pub mod public_call;
 pub mod public_payload;
 pub mod transport_types;
@@ -69,7 +71,6 @@ pub fn accept_with_retry(
 
 #[cfg(test)]
 mod accept_tests {
-    use super::*;
 
     #[test]
     fn transient_accept_waits_then_serves_the_next_client() {

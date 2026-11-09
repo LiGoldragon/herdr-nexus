@@ -8,7 +8,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Vec::<u8>::from(body),
     )
     .restore()?;
-    drop(stdin);
     nix::unistd::close(0)?;
     server::run(&bootstrap)?;
     Ok(())

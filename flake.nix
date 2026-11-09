@@ -121,8 +121,14 @@
             ''
           ) workspace.workspaceMembers;
         extraChecks =
-          { pkgs, ... }:
+          { pkgs, workspace, clippy, doc, ... }:
           let
+            lintChecks = lib.listToAttrs (
+            lib.concatMap (member: [
+              { name = "clippy-${member}"; value = clippy member (lib.attrNames (workspace.internal.crates.${workspace.workspaceMembers.${member}.packageId}.features or { })) [ "-D" "warnings" ]; }
+              { name = "doc-${member}"; value = doc member (lib.attrNames (workspace.internal.crates.${workspace.workspaceMembers.${member}.packageId}.features or { })) [ "-D" "warnings" ]; }
+            ]) (lib.attrNames workspace.workspaceMembers)
+          );
             package = (workspaces.${pkgs.stdenv.hostPlatform.system}).packages.default;
             generator = ethos-zero.packages.${pkgs.stdenv.hostPlatform.system}.default;
             contract =
@@ -164,6 +170,7 @@
                 '';
           in
           checked
+          // lintChecks
           // {
             generated = pkgs.runCommand "herdr-generated-contracts" {
               contracts = lib.attrValues checked;

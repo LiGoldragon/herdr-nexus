@@ -218,7 +218,7 @@ pub fn principal_for(
 ) -> std::io::Result<shared_translator::Principal> {
     match authority {
         PublicAuthority::Translator => Ok(shared_translator::Principal::Login(
-            serialized.user_id.clone(),
+            serialized.user_id,
         )),
         PublicAuthority::Peer { peer_id, .. }
             if serialized.user_id == actual.user_id
@@ -1506,7 +1506,7 @@ impl ConfigurationStore {
     ) -> core_meta_herdr_nexus::Response {
         use core_meta_herdr_nexus::Response;
         use meta_signal_herdr_nexus::{
-            ConfigurationRefusal, Invalid_Data, Message, Owner, Readiness, SettingName,
+            ConfigurationRefusal, Invalid_Data, Message, Owner, SettingName,
         };
         let _transaction = self
             .configuration_transaction
@@ -1629,8 +1629,8 @@ impl ConfigurationStore {
         match setting {
             core_meta_herdr_nexus::CoreSet::Peer(binding) => {
                 let caller = shared_translator::Caller {
-                    user_id: binding.peer_identity.user_id.clone(),
-                    process_id: binding.peer_identity.process_id.clone(),
+                    user_id: binding.peer_identity.user_id,
+                    process_id: binding.peer_identity.process_id,
                 };
                 let live = match shared_translator::unix::LivePeer::capture(binding.peer_identity) {
                     Ok(live) => live,
@@ -3038,8 +3038,8 @@ mod tests {
         let (client, _server) = std::os::unix::net::UnixStream::pair().expect("socket pair");
         let actual = herdr_nexus_wire::frame::peer_caller(&client).expect("peer credentials");
         let paired = BoundPeer::capture(PeerIdentity {
-            user_id: actual.user_id.clone(),
-            process_id: actual.process_id.clone(),
+            user_id: actual.user_id,
+            process_id: actual.process_id,
         }).expect("capture current process");
         assert!(require_peer(&client, &paired).is_ok());
         let forged = BoundPeer::capture(PeerIdentity {
