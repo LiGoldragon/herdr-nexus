@@ -38,13 +38,17 @@
             }).crates.${generated.workspaceMembers.${name}.packageId}.override
               { crateOverrides = context.crateOverrides; };
           daemon = memberWith "herdr-nexus-daemon" [ ];
-          translator = memberWith "herdr-nexus-translator" [ "default" "text" ];
+          built = memberWith "herdr-nexus-translator" [ "default" "text" ];
+          translator = pkgs.runCommand "herdr-translator" { } ''
+            mkdir -p "$out/bin"
+            cp ${built}/bin/herdr-translator "$out/bin/herdr-translator"
+          '';
           cli = pkgs.runCommand "herdr-nexus-cli" { } ''
             mkdir -p "$out/bin" "$out/libexec"
             for executable in herdr-nexus herdr-nexus-meta herdr-nexus-place; do
-              cp ${translator}/bin/$executable "$out/bin/$executable"
+              cp ${built}/bin/$executable "$out/bin/$executable"
             done
-            cp ${translator}/bin/herdr-pair "$out/libexec/herdr-pair-launcher"
+            cp ${built}/bin/herdr-pair "$out/libexec/herdr-pair-launcher"
           '';
           pair = pkgs.writeShellScriptBin "herdr-pair" ''
             if [[ $# -ne 1 ]]; then
