@@ -88,12 +88,31 @@
                   buildRustCrateForPkgsFunc =
                     p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
                 }).crates.${packageId}.override
-                  { buildTests = true; inherit crateOverrides; };
+                  {
+                    buildTests = true;
+                    crateOverrides = crateOverrides // {
+                      ${name} =
+                        attributes:
+                        let
+                          given = (crateOverrides.${name} or (_: { })) attributes;
+                        in
+                        given
+                        // {
+                          preBuild = (given.preBuild or "") + ''
+                            export CARGO_TARGET_TMPDIR="$PWD/target/tmp"
+                          '';
+                          postInstall = (given.postInstall or "") + ''
+                            echo "$CARGO_TARGET_TMPDIR" > $out/target-tmpdir
+                          '';
+                        };
+                    };
+                  };
             in
             pkgs.runCommand "check-${name}" { passthru = { inherit tests; }; } ''
               cp -r ${tests.src} "$NIX_BUILD_TOP/source"
               chmod -R u+w "$NIX_BUILD_TOP/source"
               cd "$NIX_BUILD_TOP/source"
+              mkdir -p "$(cat ${tests}/target-tmpdir)"
               for binary in ${tests}/tests/*; do
                 echo "running $(basename "$binary")"
                 "$binary"
