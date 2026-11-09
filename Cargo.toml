@@ -8,7 +8,7 @@ rust-version = "1.89"
 
 [workspace.dependencies]
 signal-herdr-nexus = { git = "https://github.com/LiGoldragon/signal-herdr-nexus", rev = "10b9d21", default-features = false }
-meta-signal-herdr-nexus = { git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus", rev = "d00ae37", default-features = false }
+meta-signal-herdr-nexus = { git = "https://github.com/LiGoldragon/meta-signal-herdr-nexus", rev = "bf27dc2", default-features = false }
 signal = { git = "https://github.com/LiGoldragon/signal", rev = "6d4eb74", default-features = false }
 shared-translator = { package = "translator", git = "https://github.com/LiGoldragon/translator", rev = "abc89b9", default-features = false, features = ["unix"] }
 translator = { git = "https://github.com/LiGoldragon/translator", rev = "abc89b9", default-features = false }

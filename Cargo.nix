@@ -253,7 +253,7 @@ rec {
           "extra-platforms" = [ "dep:extra-platforms" ];
           "serde" = [ "dep:serde" ];
         };
-        resolvedDefaultFeatures = [ "std" ];
+        resolvedDefaultFeatures = [ "default" "std" ];
       };
       "cfg-if" = rec {
         crateName = "cfg-if";
@@ -898,7 +898,7 @@ rec {
             name = "tokio";
             packageId = "tokio";
             usesDefaultFeatures = false;
-            features = [ "macros" ];
+            features = [ "macros" "io-util" ];
           }
           {
             name = "translator";
@@ -1054,13 +1054,13 @@ rec {
       };
       "meta-signal-herdr-nexus" = rec {
         crateName = "meta-signal-herdr-nexus";
-        version = "0.4.0";
+        version = "0.4.1";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/meta-signal-herdr-nexus";
-          rev = "d00ae37f72032d787c03392eef6e972ff4bae57a";
-          sha256 = "0lh1myp9x9d1dhv1zlfh4ypgr3qd7ayq6ndy3xxq54zwigzsf7s0";
+          rev = "bf27dc28a781b53aad553398faa27db1524651e6";
+          sha256 = "007jmhniy2gkh29q4m60ll9xj0rq6m5s3p0cl1nga5dsgalzix4x";
         };
         libName = "meta_signal_herdr_nexus";
         dependencies = [
@@ -1089,6 +1089,7 @@ rec {
             name = "translator";
             packageId = "translator";
             usesDefaultFeatures = false;
+            features = [ "unix" ];
           }
         ];
         features = {
@@ -2087,6 +2088,11 @@ rec {
         ];
         dependencies = [
           {
+            name = "bytes";
+            packageId = "bytes";
+            optional = true;
+          }
+          {
             name = "pin-project-lite";
             packageId = "pin-project-lite";
           }
@@ -2117,7 +2123,7 @@ rec {
           "tracing" = [ "dep:tracing" ];
           "windows-sys" = [ "dep:windows-sys" ];
         };
-        resolvedDefaultFeatures = [ "macros" "tokio-macros" ];
+        resolvedDefaultFeatures = [ "bytes" "io-util" "macros" "tokio-macros" ];
       };
       "tokio-macros" = rec {
         crateName = "tokio-macros";

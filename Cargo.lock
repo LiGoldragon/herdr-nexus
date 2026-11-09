@@ -286,8 +286,8 @@ dependencies = [
 
 [[package]]
 name = "meta-signal-herdr-nexus"
-version = "0.4.0"
-source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=d00ae37#d00ae37f72032d787c03392eef6e972ff4bae57a"
+version = "0.4.1"
+source = "git+https://github.com/LiGoldragon/meta-signal-herdr-nexus?rev=bf27dc2#bf27dc28a781b53aad553398faa27db1524651e6"
 dependencies = [
  "datom-codec",
  "protos",
@@ -605,6 +605,7 @@ version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
 dependencies = [
+ "bytes",
  "pin-project-lite",
  "tokio-macros",
 ]
