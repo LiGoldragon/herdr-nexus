@@ -68,6 +68,35 @@
       );
       workspace = base.lib.workspaceOutputs {
         inherit cargoNix;
+        # The tests are written for every feature on, as `cargo test
+        # --workspace --all-features` ran them.
+        memberChecks =
+          { pkgs, workspace, buildRustCrateForPkgs, crateOverrides, ... }:
+          lib.mapAttrs (
+            name: member:
+            let
+              packageId = member.packageId;
+              features = lib.attrNames (workspace.internal.crates.${packageId}.features or { });
+              tests =
+                (workspace.internal.builtRustCratesWithFeatures {
+                  inherit packageId features;
+                  runTests = true;
+                  buildRustCrateForPkgsFunc =
+                    p: (buildRustCrateForPkgs p).override { defaultCrateOverrides = crateOverrides; };
+                }).crates.${packageId}.override
+                  { buildTests = true; inherit crateOverrides; };
+            in
+            pkgs.runCommand "check-${name}" { passthru = { inherit tests; }; } ''
+              cp -r ${tests.src} "$NIX_BUILD_TOP/source"
+              chmod -R u+w "$NIX_BUILD_TOP/source"
+              cd "$NIX_BUILD_TOP/source"
+              for binary in ${tests}/tests/*; do
+                echo "running $(basename "$binary")"
+                "$binary"
+              done
+              touch $out
+            ''
+          ) workspace.workspaceMembers;
         extraChecks =
           { pkgs, ... }:
           let
