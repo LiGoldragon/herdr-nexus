@@ -28,15 +28,21 @@
           composed = base.lib.workspace.${system} { inherit cargoNix; };
           generated = composed.workspace;
           # A member built with the features its binaries are written for.
+          # Its crates are the base's, under the feature set name this build
+          # takes: the daemon's plain, the CLI's datom.
           memberWith =
             name: features:
-            (generated.internal.builtRustCratesWithFeatures {
+            let
               packageId = generated.workspaceMembers.${name}.packageId;
-              inherit features;
+            in
+            (generated.internal.builtRustCratesWithFeatures {
+              inherit packageId features;
               runTests = false;
-              buildRustCrateForPkgsFunc = composed.buildRustCrateForPkgs;
-            }).crates.${generated.workspaceMembers.${name}.packageId}.override
-              { crateOverrides = context.crateOverrides; };
+              buildRustCrateForPkgsFunc = composed.buildRustCrateForPkgsFor {
+                inherit packageId features;
+                runTests = false;
+              };
+            }).crates.${packageId};
           daemon = memberWith "herdr-nexus-daemon" [ ];
           built = memberWith "herdr-nexus-translator" [ "default" "text" ];
           translator = pkgs.runCommand "herdr-translator" { } ''
