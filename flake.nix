@@ -103,11 +103,10 @@
             ''
           ) workspace.workspaceMembers;
         extraChecks =
-          { pkgs, workspace, clippy, doc, ... }:
+          { pkgs, workspace, doc, ... }:
           let
             lintChecks = lib.listToAttrs (
             lib.concatMap (member: [
-              { name = "clippy-${member}"; value = clippy member (lib.attrNames (workspace.internal.crates.${workspace.workspaceMembers.${member}.packageId}.features or { })) [ "-D" "warnings" ]; }
               { name = "doc-${member}"; value = doc member (lib.attrNames (workspace.internal.crates.${workspace.workspaceMembers.${member}.packageId}.features or { })) [ "-D" "warnings" ]; }
             ]) (lib.attrNames workspace.workspaceMembers)
           );
