@@ -1,0 +1,14 @@
+Signal
+[ :signal_herdr_nexus:observation_status:[ Session SourceGeneration SourceFailure ] ; imports: shared source identity and terminal failure
+  :signal_herdr_nexus:PaneId ]
+[ Observe.{ Session SourceGeneration Vector<PaneId> } ] ; inputs: one source with an explicit status-subscription set
+[ Attached.SourceGeneration                           ; outputs: attachment acknowledgement
+  Invalidated.{ SourceGeneration ObservationScope     ; a received cue invalidates a current view
+                InvalidationCause }
+  Detached.{ SourceGeneration SourceFailure } ]        ; terminal failure, never an attachment-preparation state
+[ ObservationScope.[ WholeSession                     ; types: all panes in the attached session
+                     PaneId ]                         ; or one pane, carried bare
+  InvalidationCause.[ Created Closed Exited            ; actual cue kinds, never asserted fresh state
+                      DetectionChanged StatusChanged
+                      PresentationChanged Moved
+                      MembershipChanged ] ]           ; the subscription set actually changed
