@@ -16,7 +16,7 @@ impl Frame {
             Lane::PublicText | Lane::MetaText => {
                 std::str::from_utf8(&self.payload).map_err(|_| TransportError::InvalidUtf8)
             }
-            Lane::EmissionSignal => Err(TransportError::WrongLane),
+            Lane::EmissionSignal | Lane::ObservationSignal => Err(TransportError::WrongLane),
         }
     }
 }
@@ -160,6 +160,7 @@ fn decode_lane(value: u8) -> Result<Lane, TransportError> {
         1 => Ok(Lane::PublicText),
         2 => Ok(Lane::MetaText),
         3 => Ok(Lane::EmissionSignal),
+        4 => Ok(Lane::ObservationSignal),
         other => Err(TransportError::UnknownLane(other)),
     }
 }
@@ -169,6 +170,7 @@ fn encode_lane(lane: &Lane) -> u8 {
         Lane::PublicText => 1,
         Lane::MetaText => 2,
         Lane::EmissionSignal => 3,
+        Lane::ObservationSignal => 4,
     }
 }
 

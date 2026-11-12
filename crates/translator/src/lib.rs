@@ -1,6 +1,7 @@
 //! Text-front translator and typed herdr external boundary.
 
 pub mod runner;
+pub mod observation;
 pub mod server;
 pub mod generated {
     pub mod argument;
@@ -45,7 +46,7 @@ impl TextClient {
         text: &str,
         mut receive: impl FnMut(&str) -> bool,
     ) -> Result<(), ClientError> {
-        if lane == Lane::EmissionSignal {
+        if matches!(lane, Lane::EmissionSignal | Lane::ObservationSignal) {
             return Err(ClientError::Transport(TransportError::WrongLane));
         }
         let mut stream =

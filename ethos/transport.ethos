@@ -2,7 +2,7 @@ Library
 [ shared_translator:[ Caller Place PeerIdentity ] ; imports
   meta_signal_herdr_nexus:[ BudgetValue ]
   signal_herdr_nexus:[ InstanceId ] ]
-[ Lane.[ PublicText MetaText EmissionSignal ]          ; types
+[ Lane.[ PublicText MetaText EmissionSignal ObservationSignal ]          ; types
   Kind.[ Request Answered Failed ]
   Failure.String
   PublicNexusSocket.String

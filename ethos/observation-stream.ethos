@@ -10,5 +10,4 @@ Signal
                      PaneId ]                         ; or one pane, carried bare
   InvalidationCause.[ Created Closed Exited            ; actual cue kinds, never asserted fresh state
                       DetectionChanged StatusChanged
-                      PresentationChanged Moved
-                      MembershipChanged ] ]           ; the subscription set actually changed
+                      PresentationChanged Moved ] ]        ; membership replacement stays local to the owner

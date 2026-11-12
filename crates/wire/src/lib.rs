@@ -1,6 +1,10 @@
 //! Shared typed ingress and bounded lane framing for the herdr Nexus.
 
 pub mod frame;
+pub mod observation_ports;
+pub mod wake_queue;
+#[path = "generated/observation-stream.rs"]
+pub mod observation_stream;
 pub mod deadline;
 #[allow(unused_imports)] // the generated module imports the transport types it may not use
 pub mod meta_call;

@@ -159,7 +159,7 @@ fn serve_one_paired(
     }
     let lane = request.lane.clone();
     let allowed = match endpoint {
-        Endpoint::Public => matches!(&lane, Lane::PublicText | Lane::EmissionSignal),
+        Endpoint::Public => matches!(&lane, Lane::PublicText | Lane::EmissionSignal | Lane::ObservationSignal),
         Endpoint::Meta => lane == Lane::MetaText,
     };
     if !allowed {
@@ -178,7 +178,7 @@ fn serve_one_paired(
             bootstrap.admission.frame_capacity,
         );
     }
-    if request.lane == Lane::EmissionSignal
+    if matches!(request.lane, Lane::EmissionSignal | Lane::ObservationSignal)
         && !nexus_peer.is_some_and(|expected| expected.matches(&caller))
     {
         return write_failed_frame(
@@ -187,6 +187,13 @@ fn serve_one_paired(
             "caller is not the paired Nexus",
             bootstrap.admission.frame_capacity,
         );
+    }
+    if request.lane == Lane::ObservationSignal {
+        let ready = configuration.ready().ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?;
+        let query = Signal::<herdr_nexus_wire::observation_stream::Query>::from(request.payload).restore().map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+        let herdr_nexus_wire::observation_stream::Query::Observe(request) = query;
+        drop(io);
+        return crate::observation::serve(&ready.runtime(), request, stream, bootstrap.admission.frame_capacity).map_err(|error| ServerError::Signal(format!("{error:?}")));
     }
     if request.lane == Lane::PublicText {
         let Some(ready) = configuration.ready() else {
@@ -285,7 +292,7 @@ fn serve_one_paired(
                     payload: response.into_bytes(),
                 }
             }
-            Lane::PublicText => return Err(ServerError::Transport(herdr_nexus_wire::frame::TransportError::WrongLane)),
+            Lane::PublicText | Lane::ObservationSignal => return Err(ServerError::Transport(herdr_nexus_wire::frame::TransportError::WrongLane)),
         })
     })();
     let response = match response {

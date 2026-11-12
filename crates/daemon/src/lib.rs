@@ -1,5 +1,7 @@
 //! Daemon configuration lifecycle, independent of socket serving.
 
+pub mod observation_owner;
+
 use meta_signal_herdr_nexus::{BootstrapRefusal, Message, SocketPath};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -366,113 +368,22 @@ struct Subscriber {
 }
 
 struct SubscriberQueue {
-    state: std::sync::Mutex<SubscriberQueueState>,
-    ready: std::sync::Condvar,
+    queue: herdr_nexus_wire::wake_queue::WakeQueue<signal_herdr_nexus::Response>,
 }
-
-struct SubscriberQueueState {
-    pending: std::collections::VecDeque<signal_herdr_nexus::Response>,
-    capacity: usize,
-    closed: bool,
-}
-
-enum QueueNext {
-    Response(signal_herdr_nexus::Response),
-    Quiet,
-    Closed,
-}
-
 impl SubscriberQueue {
-    fn new(capacity: usize) -> Self {
-        Self {
-            state: std::sync::Mutex::new(SubscriberQueueState {
-                pending: std::collections::VecDeque::new(),
-                capacity,
-                closed: false,
-            }),
-            ready: std::sync::Condvar::new(),
-        }
+    fn new(capacity: usize) -> std::io::Result<Self> {
+        Ok(Self { queue: herdr_nexus_wire::wake_queue::WakeQueue::new(capacity)? })
     }
-
     fn enqueue(&self, response: signal_herdr_nexus::Response) -> bool {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.closed || state.pending.len() >= state.capacity {
-            state.closed = true;
-            state.pending.clear();
-            self.ready.notify_all();
-            return false;
-        }
-        state.pending.push_back(response);
-        self.ready.notify_one();
-        true
+        use herdr_nexus_wire::observation_ports::Deliverable;
+        self.queue.deliver(response).is_ok()
     }
-
-    fn next_for(&self, wait: Duration) -> QueueNext {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if state.pending.is_empty() && !state.closed {
-            let (next, result) = self
-                .ready
-                .wait_timeout(state, wait)
-                .unwrap_or_else(|p| p.into_inner());
-            state = next;
-            if result.timed_out() && state.pending.is_empty() && !state.closed {
-                return QueueNext::Quiet;
-            }
-        }
-        if state.closed {
-            QueueNext::Closed
-        } else {
-            QueueNext::Response(state.pending.pop_front().expect("nonempty subscriber queue"))
-        }
+    fn next(&self, peer: &std::os::unix::net::UnixStream) -> std::io::Result<Option<signal_herdr_nexus::Response>> {
+        self.queue.receive(peer)
     }
-
-    fn set_capacity(&self, capacity: usize) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.capacity = capacity;
-        if state.pending.len() > capacity {
-            state.closed = true;
-            state.pending.clear();
-            self.ready.notify_all();
-        }
-    }
-
-    fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        state.closed = true;
-        state.pending.clear();
-        self.ready.notify_all();
-    }
-
-    fn is_open(&self) -> bool {
-        !self.state.lock().unwrap_or_else(|p| p.into_inner()).closed
-    }
-}
-
-fn operation(
-    query: signal_herdr_nexus::Query,
-) -> herdr_nexus_core::generated::operation::Operation {
-    use herdr_nexus_core::generated::operation::{
-        Operation, Pressing_Data, Prompting_Data, Starting_Data,
-    };
-    match query {
-        signal_herdr_nexus::Query::Create(workspace) => Operation::Creating(workspace),
-        signal_herdr_nexus::Query::Start(start) => Operation::Starting(Starting_Data {
-            pane: start.pane,
-            command: start.command,
-            label: start.label,
-        }),
-        signal_herdr_nexus::Query::Prompt(prompt) => Operation::Prompting(Prompting_Data {
-            pane: prompt.pane,
-            text: prompt.text,
-        }),
-        signal_herdr_nexus::Query::Press(press) => Operation::Pressing(Pressing_Data {
-            pane: press.pane,
-            keys: press.keys,
-        }),
-        signal_herdr_nexus::Query::Close(pane) => Operation::Closing(pane),
-        signal_herdr_nexus::Query::List(session) => Operation::Listing(session),
-        signal_herdr_nexus::Query::Subscribe(session) => Operation::Subscribing(session),
-    }
+    fn set_capacity(&self, capacity: usize) { self.queue.set_capacity(capacity); }
+    fn close(&self) { self.queue.close(); }
+    fn is_open(&self) -> bool { self.queue.is_open() }
 }
 
 impl Dispatcher {
@@ -762,14 +673,14 @@ impl Dispatcher {
     }
 
     fn reserve(&self, principal: &shared_translator::Principal, pane: &signal_herdr_nexus::Pane) -> Result<u64, signal_herdr_nexus::Outcome> {
-        use signal_herdr_nexus::{AttemptInProgress, Outcome};
+        use signal_herdr_nexus::Outcome;
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         state.core.preflight_owned(pane)?;
         if state.principals.get(pane) != Some(principal) {
             return Err(Outcome::Unknown(pane.clone()));
         }
         if state.reserved.contains_key(pane) {
-            return Err(Outcome::AttemptInProgress(AttemptInProgress(pane.clone())));
+            return Err(Outcome::AttemptInProgress(pane.clone()));
         }
         let token = state.next_reservation;
         state.next_reservation = state.next_reservation.wrapping_add(1).max(1);
@@ -827,8 +738,8 @@ impl Dispatcher {
         configuration: Arc<ReadyCoreConfiguration>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         use signal_herdr_nexus::{Changed_Data, Response};
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
         let (acknowledgement, current) = {
-            let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
             let acknowledgement = Response::Subscribed(state.core.subscribe(
                 session.clone(),
                 herdr_nexus_core::ExternalResult::Succeeded(()),
@@ -843,7 +754,7 @@ impl Dispatcher {
                 .collect::<std::collections::HashMap<_, _>>();
             (acknowledgement, current)
         };
-        let queue = Arc::new(SubscriberQueue::new(configuration.subscriber_capacity));
+        let queue = Arc::new(SubscriberQueue::new(configuration.subscriber_capacity)?);
         if !queue.enqueue(acknowledgement) {
             return Err("subscriber queue refused its acknowledgement".into());
         }
@@ -868,61 +779,45 @@ impl Dispatcher {
                 return Err("configured peer binding changed before subscription registration".into());
             }
         }
-        let writer_queue = Arc::clone(&queue);
-        let writer_configuration = Arc::clone(&self.configuration);
-        std::thread::spawn(move || loop {
-            let Some(configuration) = writer_configuration.snapshot() else {
-                writer_queue.close();
-                return;
-            };
-            match writer_queue.next_for(configuration.polling) {
-                QueueNext::Closed => return,
-                QueueNext::Quiet => {
-                    if subscription_peer_closed(&stream) {
-                        writer_queue.close();
-                        return;
-                    }
-                }
-                QueueNext::Response(response) => {
-                    let Some(configuration) = writer_configuration.snapshot() else {
-                        writer_queue.close();
-                        return;
-                    };
-                    if write_subscription_change(&stream, &configuration, &response).is_err() {
-                        writer_queue.close();
-                        return;
-                    }
-                }
-            }
-        });
         let mut hub = self
             .subscriptions
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (principal.clone(), session.clone());
-        if let Some(existing) = hub.sessions.get_mut(&key) {
-            existing.subscribers.push(Subscriber {
-                queue,
-                delivered: current,
+        let generation = if let Some(existing) = hub.sessions.get_mut(&key) {
+            existing.subscribers.push(Subscriber { queue: Arc::clone(&queue), delivered: current });
+            None
+        } else {
+            let generation = self.next_subscription_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            hub.sessions.insert(key.clone(), SessionSubscription {
+                generation, subscribers: vec![Subscriber { queue: Arc::clone(&queue), delivered: current }],
             });
-            return Ok(());
-        }
-        let generation = self
-            .next_subscription_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        hub.sessions.insert(
-            key,
-            SessionSubscription {
-                generation,
-                subscribers: vec![Subscriber {
-                    queue,
-                    delivered: current,
-                }],
-            },
-        );
+            Some(generation)
+        };
         drop(hub);
+        drop(state);
         let dispatcher = Arc::clone(self);
-        std::thread::spawn(move || dispatcher.poll_subscription(principal, session, generation));
+        let writer_queue = Arc::clone(&queue);
+        std::thread::spawn(move || {
+            loop {
+                let response = match writer_queue.next(&stream) {
+                    Ok(Some(response)) => response,
+                    Ok(None) | Err(_) => break,
+                };
+                let Some(configuration) = dispatcher.configuration.snapshot() else { break; };
+                if write_subscription_change(&stream, &configuration, &response).is_err() { break; }
+            }
+            writer_queue.close();
+            let mut hub = dispatcher.subscriptions.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(source) = hub.sessions.get_mut(&key) {
+                source.subscribers.retain(|subscriber| !Arc::ptr_eq(&subscriber.queue, &writer_queue));
+                if source.subscribers.is_empty() { hub.sessions.remove(&key); }
+            }
+        });
+        if let Some(generation) = generation {
+            let dispatcher = Arc::clone(self);
+            std::thread::spawn(move || dispatcher.poll_subscription(principal, session, generation));
+        }
         Ok(())
     }
 
@@ -1201,20 +1096,6 @@ fn write_subscription_change(
     Ok(())
 }
 
-fn subscription_peer_closed(stream: &std::os::unix::net::UnixStream) -> bool {
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-    use std::os::fd::AsFd;
-    let mut descriptors = [PollFd::new(
-        stream.as_fd(),
-        PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL,
-    )];
-    match poll(&mut descriptors, PollTimeout::ZERO) {
-        Ok(_) => descriptors[0].revents().is_some_and(|events| {
-            events.intersects(PollFlags::POLLHUP | PollFlags::POLLERR | PollFlags::POLLNVAL)
-        }),
-        Err(_) => true,
-    }
-}
 
 fn done_result(outcome: EmissionResult) -> herdr_nexus_core::ExternalResult<()> {
     match outcome {
@@ -2024,7 +1905,7 @@ mod tests {
             },
         };
         assert!(matches!(store.configure(CoreSet::Peer(binding.clone()), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
-        let queue = Arc::new(SubscriberQueue::new(1));
+        let queue = Arc::new(SubscriberQueue::new(1).expect("wake queue descriptors"));
         assert!(store.register_peer_subscriber(&peer_id, 1, &queue));
         assert!(queue.is_open());
         assert!(matches!(store.configure(CoreSet::Peer(binding), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
@@ -2049,11 +1930,11 @@ mod tests {
         };
         let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
         assert!(matches!(store.configure(CoreSet::Peer(binding), || Ok(())), core_meta_herdr_nexus::Response::Configured(_)));
-        let stale = Arc::new(SubscriberQueue::new(1));
+        let stale = Arc::new(SubscriberQueue::new(1).expect("wake queue descriptors"));
         assert!(!store.register_peer_subscriber(&peer_id, old_generation, &stale));
         assert!(!stale.is_open());
         let (_, new_generation) = store.peer_for(&caller).expect("replacement binding admitted");
-        let current = Arc::new(SubscriberQueue::new(1));
+        let current = Arc::new(SubscriberQueue::new(1).expect("wake queue descriptors"));
         assert!(store.register_peer_subscriber(&peer_id, new_generation, &current));
         assert!(current.is_open());
     }
@@ -2084,7 +1965,7 @@ mod tests {
             process_id: identity.process_id,
         };
         let (_, old_generation) = store.peer_for(&caller).expect("first binding admitted");
-        let stale = Arc::new(SubscriberQueue::new(1));
+        let stale = Arc::new(SubscriberQueue::new(1).expect("wake queue descriptors"));
         let validated = Arc::new(Barrier::new(2));
         let release = Arc::new(Barrier::new(2));
 
@@ -2130,7 +2011,7 @@ mod tests {
         assert!(!stale.is_open(), "rebind closes the just-registered old generation");
 
         let (_, new_generation) = store.peer_for(&caller).expect("replacement binding admitted");
-        let current = Arc::new(SubscriberQueue::new(1));
+        let current = Arc::new(SubscriberQueue::new(1).expect("wake queue descriptors"));
         assert!(store.register_peer_subscriber(&peer_id, new_generation, &current));
         assert!(current.is_open(), "the current generation remains subscribed");
     }
@@ -3007,8 +2888,8 @@ mod tests {
     #[test]
     fn bounded_subscriber_queue_disconnects_only_the_overflowing_peer() {
         use signal_herdr_nexus::{Outcome, Response};
-        let slow = SubscriberQueue::new(1);
-        let healthy = SubscriberQueue::new(2);
+        let slow = SubscriberQueue::new(1).expect("wake queue descriptors");
+        let healthy = SubscriberQueue::new(2).expect("wake queue descriptors");
         assert!(slow.enqueue(Response::Subscribed(Outcome::Done)));
         assert!(!slow.enqueue(Response::Subscribed(Outcome::Done)));
         assert!(!slow.is_open());
@@ -3020,8 +2901,8 @@ mod tests {
     fn lowering_subscriber_capacity_disconnects_only_queues_above_the_new_bound() {
         use signal_herdr_nexus::{Outcome, Response};
         let store = ConfigurationStore::default();
-        let over = Arc::new(SubscriberQueue::new(3));
-        let within = Arc::new(SubscriberQueue::new(3));
+        let over = Arc::new(SubscriberQueue::new(3).expect("wake queue descriptors"));
+        let within = Arc::new(SubscriberQueue::new(3).expect("wake queue descriptors"));
         store.register_subscriber(&over);
         store.register_subscriber(&within);
         assert!(over.enqueue(Response::Subscribed(Outcome::Done)));
