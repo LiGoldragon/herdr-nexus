@@ -311,7 +311,7 @@ impl Deliverable for FrameDelivery<'_> {
         let bytes = response
             .signalize()
             .map_err(|error| protocol(format!("{error:?}")))?;
-        let mut stream = herdr_nexus_wire::DeadlineStream::new(
+        let mut stream = herdr_nexus_wire::deadline::DeadlineStream::new(
             self.peer
                 .try_clone()
                 .map_err(|error| protocol(error.to_string()))?,

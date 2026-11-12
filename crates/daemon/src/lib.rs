@@ -878,11 +878,7 @@ impl Dispatcher {
         let dispatcher = Arc::clone(self);
         let writer_queue = Arc::clone(&queue);
         std::thread::spawn(move || {
-            loop {
-                let response = match writer_queue.next(&stream) {
-                    Ok(Some(response)) => response,
-                    Ok(None) | Err(_) => break,
-                };
+            while let Ok(Some(response)) = writer_queue.next(&stream) {
                 let Some(configuration) = dispatcher.configuration.snapshot() else {
                     break;
                 };
