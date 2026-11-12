@@ -411,6 +411,33 @@ impl SubscriberQueue {
     }
 }
 
+fn operation(
+    query: signal_herdr_nexus::Query,
+) -> herdr_nexus_core::generated::operation::Operation {
+    use herdr_nexus_core::generated::operation::{
+        Operation, Pressing_Data, Prompting_Data, Starting_Data,
+    };
+    match query {
+        signal_herdr_nexus::Query::Create(workspace) => Operation::Creating(workspace),
+        signal_herdr_nexus::Query::Start(start) => Operation::Starting(Starting_Data {
+            pane: start.pane,
+            command: start.command,
+            label: start.label,
+        }),
+        signal_herdr_nexus::Query::Prompt(prompt) => Operation::Prompting(Prompting_Data {
+            pane: prompt.pane,
+            text: prompt.text,
+        }),
+        signal_herdr_nexus::Query::Press(press) => Operation::Pressing(Pressing_Data {
+            pane: press.pane,
+            keys: press.keys,
+        }),
+        signal_herdr_nexus::Query::Close(pane) => Operation::Closing(pane),
+        signal_herdr_nexus::Query::List(session) => Operation::Listing(session),
+        signal_herdr_nexus::Query::Subscribe(session) => Operation::Subscribing(session),
+    }
+}
+
 impl Dispatcher {
     pub fn new(
         paths: &SocketPaths,
