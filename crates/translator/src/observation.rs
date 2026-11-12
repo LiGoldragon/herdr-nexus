@@ -411,4 +411,54 @@ mod tests {
             .iter()
             .all(|value| matches!(value, Response::Invalidated(_))));
     }
+    #[test]
+    fn quiet_attachment_cancels_from_the_port() {
+        use std::io::BufRead;
+        struct CancelOnAttachment {
+            control: Mutex<Option<UnixStream>>,
+            seen: Mutex<Vec<Response>>,
+        }
+        impl Deliverable for CancelOnAttachment {
+            type Item = Response;
+            type Failure = SourceFailure;
+            fn deliver(&self, value: Response) -> Result<(), SourceFailure> {
+                assert!(matches!(value, Response::Attached(_)));
+                self.seen.lock().unwrap().push(value);
+                self.control.lock().unwrap().take();
+                Ok(())
+            }
+        }
+        let (source, mut producer) = UnixStream::pair().unwrap();
+        let (control, cancel) = UnixStream::pair().unwrap();
+        let producer_thread = std::thread::spawn(move || {
+            let mut line = String::new();
+            std::io::BufReader::new(producer.try_clone().unwrap())
+                .read_line(&mut line)
+                .unwrap();
+            producer
+                .write_all(b"{\"id\":1,\"result\":{\"type\":\"subscription_started\"}}\n")
+                .unwrap();
+            let mut byte = [0];
+            assert_eq!(producer.read(&mut byte).unwrap(), 0);
+        });
+        let runtime =
+            Runtime::new("/unused".into(), std::time::Duration::from_secs(2), 16384).unwrap();
+        let capture = CancelOnAttachment {
+            control: Mutex::new(Some(control)),
+            seen: Mutex::new(vec![]),
+        };
+        let result = HerdrObservationAdapter { runtime: &runtime }.observe_connected(
+            source,
+            Observe_Data {
+                session: signal_herdr_nexus::Session("main".into()),
+                source_generation: signal_herdr_nexus::SourceGeneration(1),
+                pane_id_vector: vec![],
+            },
+            &capture,
+            &PeerCancellation(&cancel),
+        );
+        assert_eq!(result, Ok(()));
+        assert_eq!(capture.seen.into_inner().unwrap().len(), 1);
+        producer_thread.join().unwrap();
+    }
 }
