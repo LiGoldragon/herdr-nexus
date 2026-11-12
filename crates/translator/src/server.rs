@@ -1,8 +1,8 @@
-use crate::runner::{self, Captured};
 use crate::generated::argument::{Arguable, ListArgument, PaneCloseArgument};
+use crate::runner::{self, Captured};
 use emission_herdr_nexus::{
-    AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, SendKeys_Data,
-    PaneListing, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId, WorkspaceLabel,
+    AgentListing, AgentPrompt_Data, AgentStart_Data, ExternalOutcome, Herdr, PaneListing,
+    SendKeys_Data, TabId, TerminalId, Verb, WorkspaceCreate_Data, WorkspaceId, WorkspaceLabel,
     WorkspaceListing,
 };
 use serde::Deserialize;
@@ -47,14 +47,17 @@ pub fn run(
         .map_err(|message| ServerError::Signal(message.into()))?;
     let bootstrap_budget = validated_budget(&bootstrap.budget_value)
         .ok_or_else(|| ServerError::Signal("invalid bootstrap text budget".into()))?;
-    let bootstrap_meta = BootstrapMeta { admission, text_budget: bootstrap_budget };
+    let bootstrap_meta = BootstrapMeta {
+        admission,
+        text_budget: bootstrap_budget,
+    };
     let names = herdr_nexus_wire::socket_names();
     let runtime = shared_translator::placement::runtime_path(place);
     let public = OwnedSocket::bind(runtime.join(names.public_translator_socket.0))?;
     let meta = OwnedSocket::bind(runtime.join(names.meta_translator_socket.0))?;
     let configuration = std::sync::Arc::new(TranslatorConfiguration::default());
     let nexus_peer = std::sync::Arc::new(
-        NexusPeer::capture(bootstrap.peer_identity.clone()).map_err(ServerError::Io)?
+        NexusPeer::capture(bootstrap.peer_identity.clone()).map_err(ServerError::Io)?,
     );
     let meta_peer = std::sync::Arc::clone(&nexus_peer);
     let meta_configuration = std::sync::Arc::clone(&configuration);
@@ -92,11 +95,9 @@ fn serve_listener(
     nexus_peer: std::sync::Arc<NexusPeer>,
 ) -> Result<(), ServerError> {
     loop {
-        let (mut stream, _) = herdr_nexus_wire::accept_with_retry(
-            &bound.listener,
-            bootstrap.admission.retry_delay,
-        )
-        .map_err(ServerError::Io)?;
+        let (mut stream, _) =
+            herdr_nexus_wire::accept_with_retry(&bound.listener, bootstrap.admission.retry_delay)
+                .map_err(ServerError::Io)?;
         let configuration = std::sync::Arc::clone(&configuration);
         let place = place.clone();
         let nexus_peer = std::sync::Arc::clone(&nexus_peer);
@@ -123,15 +124,11 @@ pub fn serve_one(
     admission: herdr_nexus_wire::ValidAdmission,
     bootstrap_budget: (usize, usize),
 ) -> Result<(), ServerError> {
-    let bootstrap = BootstrapMeta { admission, text_budget: bootstrap_budget };
-    serve_one_paired(
-        stream,
-        configuration,
-        place,
-        endpoint,
-        bootstrap,
-        None,
-    )
+    let bootstrap = BootstrapMeta {
+        admission,
+        text_budget: bootstrap_budget,
+    };
+    serve_one_paired(stream, configuration, place, endpoint, bootstrap, None)
 }
 
 fn serve_one_paired(
@@ -150,8 +147,8 @@ fn serve_one_paired(
         bootstrap.admission.deadline,
     )
     .map_err(ServerError::Io)?;
-    let request =
-        transport::read_frame(&mut io, bootstrap.admission.frame_capacity).map_err(ServerError::Transport)?;
+    let request = transport::read_frame(&mut io, bootstrap.admission.frame_capacity)
+        .map_err(ServerError::Transport)?;
     if request.kind != Kind::Request {
         return Err(ServerError::Transport(
             crate::transport::TransportError::InvalidLength,
@@ -159,7 +156,10 @@ fn serve_one_paired(
     }
     let lane = request.lane.clone();
     let allowed = match endpoint {
-        Endpoint::Public => matches!(&lane, Lane::PublicText | Lane::EmissionSignal | Lane::ObservationSignal),
+        Endpoint::Public => matches!(
+            &lane,
+            Lane::PublicText | Lane::EmissionSignal | Lane::ObservationSignal
+        ),
         Endpoint::Meta => lane == Lane::MetaText,
     };
     if !allowed {
@@ -189,11 +189,21 @@ fn serve_one_paired(
         );
     }
     if request.lane == Lane::ObservationSignal {
-        let ready = configuration.ready().ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?;
-        let query = Signal::<herdr_nexus_wire::observation_stream::Query>::from(request.payload).restore().map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+        let ready = configuration
+            .ready()
+            .ok_or_else(|| ServerError::Signal("translator is awaiting settings".into()))?;
+        let query = Signal::<herdr_nexus_wire::observation_stream::Query>::from(request.payload)
+            .restore()
+            .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
         let herdr_nexus_wire::observation_stream::Query::Observe(request) = query;
         drop(io);
-        return crate::observation::serve(&ready.runtime(), request, stream, bootstrap.admission.frame_capacity).map_err(|error| ServerError::Signal(format!("{error:?}")));
+        return crate::observation::serve(
+            &ready.runtime(),
+            request,
+            stream,
+            bootstrap.admission.frame_capacity,
+        )
+        .map_err(|error| ServerError::Signal(format!("{error:?}")));
     }
     if request.lane == Lane::PublicText {
         let Some(ready) = configuration.ready() else {
@@ -215,9 +225,16 @@ fn serve_one_paired(
             Err(error) => {
                 drop(io);
                 let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-                    stream.try_clone().map_err(ServerError::Io)?, progress_timeout,
-                ).map_err(ServerError::Io)?;
-                return write_failed_frame(&mut output, lane, &error.to_string(), bootstrap.admission.frame_capacity);
+                    stream.try_clone().map_err(ServerError::Io)?,
+                    progress_timeout,
+                )
+                .map_err(ServerError::Io)?;
+                return write_failed_frame(
+                    &mut output,
+                    lane,
+                    &error.to_string(),
+                    bootstrap.admission.frame_capacity,
+                );
             }
         };
         if matches!(query, signal_herdr_nexus::Query::Subscribe(_)) {
@@ -251,8 +268,10 @@ fn serve_one_paired(
         };
         drop(io);
         let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-            stream.try_clone().map_err(ServerError::Io)?, progress_timeout,
-        ).map_err(ServerError::Io)?;
+            stream.try_clone().map_err(ServerError::Io)?,
+            progress_timeout,
+        )
+        .map_err(ServerError::Io)?;
         return transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
             .map_err(ServerError::Transport);
     }
@@ -268,9 +287,10 @@ fn serve_one_paired(
                     ));
                 };
                 let emission_herdr_nexus::Query::Emit(herdr) = query;
-                let response = emission_herdr_nexus::Response::Emitted(execute(&ready.runtime(), &herdr))
-                    .signalize()
-                    .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
+                let response =
+                    emission_herdr_nexus::Response::Emitted(execute(&ready.runtime(), &herdr))
+                        .signalize()
+                        .map_err(|error| ServerError::Signal(format!("{error:?}")))?;
                 Frame {
                     lane: Lane::EmissionSignal,
                     kind: Kind::Answered,
@@ -279,20 +299,19 @@ fn serve_one_paired(
             }
             Lane::MetaText => {
                 let text = request.text().map_err(ServerError::Transport)?;
-                let response = configure_text(
-                    configuration,
-                    place,
-                    caller.clone(),
-                    text,
-                    bootstrap,
-                )?;
+                let response =
+                    configure_text(configuration, place, caller.clone(), text, bootstrap)?;
                 Frame {
                     lane: Lane::MetaText,
                     kind: Kind::Answered,
                     payload: response.into_bytes(),
                 }
             }
-            Lane::PublicText | Lane::ObservationSignal => return Err(ServerError::Transport(herdr_nexus_wire::frame::TransportError::WrongLane)),
+            Lane::PublicText | Lane::ObservationSignal => {
+                return Err(ServerError::Transport(
+                    herdr_nexus_wire::frame::TransportError::WrongLane,
+                ))
+            }
         })
     })();
     let response = match response {
@@ -305,8 +324,10 @@ fn serve_one_paired(
     };
     drop(io);
     let mut output = herdr_nexus_wire::deadline::DeadlineStream::new(
-        stream.try_clone().map_err(ServerError::Io)?, bootstrap.admission.deadline,
-    ).map_err(ServerError::Io)?;
+        stream.try_clone().map_err(ServerError::Io)?,
+        bootstrap.admission.deadline,
+    )
+    .map_err(ServerError::Io)?;
     transport::write_frame(&mut output, &response, bootstrap.admission.frame_capacity)
         .map_err(ServerError::Transport)
 }
@@ -358,8 +379,12 @@ struct ReadyTranslatorConfiguration {
 
 impl ReadyTranslatorConfiguration {
     fn runtime(&self) -> Runtime {
-        Runtime::new(self.executable.clone(), self.call_timeout, self.output_limit)
-            .expect("ready translator configuration was validated before publication")
+        Runtime::new(
+            self.executable.clone(),
+            self.call_timeout,
+            self.output_limit,
+        )
+        .expect("ready translator configuration was validated before publication")
     }
 
     #[cfg(feature = "text")]
@@ -377,7 +402,11 @@ impl TranslatorConfiguration {
             output_limit: partial.output_limit?,
             text_budget: partial.text_budget?,
         };
-        Runtime::new(ready.executable.clone(), ready.call_timeout, ready.output_limit)?;
+        Runtime::new(
+            ready.executable.clone(),
+            ready.call_timeout,
+            ready.output_limit,
+        )?;
         Some(ready)
     }
 
@@ -485,15 +514,13 @@ fn configure_text(
         | meta_signal_herdr_nexus::Set::CallTimeout(_)
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_)) => configuration.apply(setting),
-        setting => {
-            forward_meta(
-                place,
-                caller,
-                core_setting(setting)?,
-                bootstrap.admission.deadline,
-                bootstrap.admission.frame_capacity,
-            )?
-        }
+        setting => forward_meta(
+            place,
+            caller,
+            core_setting(setting)?,
+            bootstrap.admission.deadline,
+            bootstrap.admission.frame_capacity,
+        )?,
     };
     Ok(shared_translator::encode(&response))
 }
@@ -520,7 +547,9 @@ fn decode_public(
         .map_err(|error| ServerError::Signal(format!("{error:?}")))
 }
 
-fn core_setting(setting: meta_signal_herdr_nexus::Set) -> Result<core_meta_herdr_nexus::CoreSet, ServerError> {
+fn core_setting(
+    setting: meta_signal_herdr_nexus::Set,
+) -> Result<core_meta_herdr_nexus::CoreSet, ServerError> {
     Ok(match setting {
         meta_signal_herdr_nexus::Set::StartTimeout(value) => {
             core_meta_herdr_nexus::CoreSet::StartTimeout(value)
@@ -537,9 +566,7 @@ fn core_setting(setting: meta_signal_herdr_nexus::Set) -> Result<core_meta_herdr
         meta_signal_herdr_nexus::Set::SubscriberCapacity(value) => {
             core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value)
         }
-        meta_signal_herdr_nexus::Set::Peer(value) => {
-            core_meta_herdr_nexus::CoreSet::Peer(value)
-        }
+        meta_signal_herdr_nexus::Set::Peer(value) => core_meta_herdr_nexus::CoreSet::Peer(value),
         meta_signal_herdr_nexus::Set::RemovePeer(value) => {
             core_meta_herdr_nexus::CoreSet::RemovePeer(value)
         }
@@ -547,7 +574,9 @@ fn core_setting(setting: meta_signal_herdr_nexus::Set) -> Result<core_meta_herdr
         | meta_signal_herdr_nexus::Set::CallTimeout(_)
         | meta_signal_herdr_nexus::Set::OutputLimit(_)
         | meta_signal_herdr_nexus::Set::TextBudget(_) => {
-            return Err(ServerError::Signal("translator setting cannot be forwarded to the Nexus".into()))
+            return Err(ServerError::Signal(
+                "translator setting cannot be forwarded to the Nexus".into(),
+            ))
         }
     })
 }
@@ -632,7 +661,7 @@ fn forward_public_stream(
         shared_translator::placement::runtime_path(place)
             .join(herdr_nexus_wire::socket_names().public_nexus_socket.0),
     )
-        .map_err(ServerError::Io)?;
+    .map_err(ServerError::Io)?;
     let mut core_write = herdr_nexus_wire::deadline::DeadlineStream::new(
         core.try_clone().map_err(ServerError::Io)?,
         progress_timeout,
@@ -649,7 +678,8 @@ fn forward_public_stream(
             core.try_clone().map_err(ServerError::Io)?,
             progress_timeout,
             admission_limit,
-        )? else {
+        )?
+        else {
             return Ok(());
         };
         let response = Signal::<herdr_nexus_wire::public_call::Response>::from(body)
@@ -692,7 +722,11 @@ fn read_subscription_signal_frame(
     match stream.read(&mut prefix[..1]) {
         Ok(0) => return Ok(None),
         Ok(1) => {}
-        Ok(_) => return Err(ServerError::Signal("subscription prefix read exceeded its one-byte buffer".into())),
+        Ok(_) => {
+            return Err(ServerError::Signal(
+                "subscription prefix read exceeded its one-byte buffer".into(),
+            ))
+        }
         Err(error) => return Err(ServerError::Io(error)),
     }
     let mut progressing = herdr_nexus_wire::deadline::DeadlineStream::new(stream, progress_timeout)
@@ -700,8 +734,9 @@ fn read_subscription_signal_frame(
     progressing
         .read_exact(&mut prefix[1..])
         .map_err(ServerError::Io)?;
-    let length = usize::try_from(u32::from_be_bytes(prefix))
-        .map_err(|_| ServerError::Signal("subscription frame length is not representable".into()))?;
+    let length = usize::try_from(u32::from_be_bytes(prefix)).map_err(|_| {
+        ServerError::Signal("subscription frame length is not representable".into())
+    })?;
     if length > capacity {
         return Err(ServerError::Signal(format!(
             "subscription frame length {length} exceeds capacity {capacity}"
@@ -754,20 +789,25 @@ fn forward_meta(
 
 fn public_setting(setting: core_meta_herdr_nexus::CoreSet) -> meta_signal_herdr_nexus::Set {
     match setting {
-        core_meta_herdr_nexus::CoreSet::StartTimeout(value) =>
-            meta_signal_herdr_nexus::Set::StartTimeout(value),
-        core_meta_herdr_nexus::CoreSet::Polling(value) =>
-            meta_signal_herdr_nexus::Set::Polling(value),
-        core_meta_herdr_nexus::CoreSet::FrameCapacity(value) =>
-            meta_signal_herdr_nexus::Set::FrameCapacity(value),
-        core_meta_herdr_nexus::CoreSet::TransportTimeout(value) =>
-            meta_signal_herdr_nexus::Set::TransportTimeout(value),
-        core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value) =>
-            meta_signal_herdr_nexus::Set::SubscriberCapacity(value),
-        core_meta_herdr_nexus::CoreSet::Peer(value) =>
-            meta_signal_herdr_nexus::Set::Peer(value),
-        core_meta_herdr_nexus::CoreSet::RemovePeer(value) =>
-            meta_signal_herdr_nexus::Set::RemovePeer(value),
+        core_meta_herdr_nexus::CoreSet::StartTimeout(value) => {
+            meta_signal_herdr_nexus::Set::StartTimeout(value)
+        }
+        core_meta_herdr_nexus::CoreSet::Polling(value) => {
+            meta_signal_herdr_nexus::Set::Polling(value)
+        }
+        core_meta_herdr_nexus::CoreSet::FrameCapacity(value) => {
+            meta_signal_herdr_nexus::Set::FrameCapacity(value)
+        }
+        core_meta_herdr_nexus::CoreSet::TransportTimeout(value) => {
+            meta_signal_herdr_nexus::Set::TransportTimeout(value)
+        }
+        core_meta_herdr_nexus::CoreSet::SubscriberCapacity(value) => {
+            meta_signal_herdr_nexus::Set::SubscriberCapacity(value)
+        }
+        core_meta_herdr_nexus::CoreSet::Peer(value) => meta_signal_herdr_nexus::Set::Peer(value),
+        core_meta_herdr_nexus::CoreSet::RemovePeer(value) => {
+            meta_signal_herdr_nexus::Set::RemovePeer(value)
+        }
     }
 }
 
@@ -835,11 +875,9 @@ pub fn execute(runtime: &Runtime, herdr: &Herdr) -> ExternalOutcome {
         Verb::AgentStart(command) => execute_command(runtime, &herdr.session, command),
         Verb::AgentPrompt(command) => execute_command(runtime, &herdr.session, command),
         Verb::SendKeys(command) => execute_command(runtime, &herdr.session, command),
-        Verb::PaneClose(pane_id) => execute_command(
-            runtime,
-            &herdr.session,
-            &PaneCloseArgument(pane_id.clone()),
-        ),
+        Verb::PaneClose(pane_id) => {
+            execute_command(runtime, &herdr.session, &PaneCloseArgument(pane_id.clone()))
+        }
         Verb::PaneList => execute_command(runtime, &herdr.session, &ListArgument::Pane),
         Verb::AgentList => execute_command(runtime, &herdr.session, &ListArgument::Agent),
     }
@@ -927,11 +965,7 @@ impl Arguable for AgentPrompt_Data {
 
 impl Arguable for SendKeys_Data {
     fn arguments(&self) -> Vec<String> {
-        let mut arguments = vec![
-            "pane".into(),
-            "send-keys".into(),
-            self.pane_id.0.clone(),
-        ];
+        let mut arguments = vec!["pane".into(), "send-keys".into(), self.pane_id.0.clone()];
         arguments.extend(self.keys.0.iter().cloned());
         arguments
     }
@@ -939,11 +973,7 @@ impl Arguable for SendKeys_Data {
 
 impl Arguable for PaneCloseArgument {
     fn arguments(&self) -> Vec<String> {
-        vec![
-            "pane".into(),
-            "close".into(),
-            self.0.0.clone(),
-        ]
+        vec!["pane".into(), "close".into(), self.0 .0.clone()]
     }
 }
 
@@ -966,7 +996,11 @@ trait ExternalCommand: Arguable {
     fn decode_success(&self, stdout: &[u8], session: &Session) -> ExternalOutcome;
 }
 
-fn execute_command<T: ExternalCommand>(runtime: &Runtime, session: &Session, command: &T) -> ExternalOutcome {
+fn execute_command<T: ExternalCommand>(
+    runtime: &Runtime,
+    session: &Session,
+    command: &T,
+) -> ExternalOutcome {
     let Some(timeout) = command.timeout(runtime) else {
         return ExternalOutcome::Uncertain;
     };
@@ -975,7 +1009,12 @@ fn execute_command<T: ExternalCommand>(runtime: &Runtime, session: &Session, com
     };
     let mut arguments = vec![OsString::from("--session"), OsString::from(&session.0)];
     arguments.extend(command.arguments().into_iter().map(OsString::from));
-    let captured = match runner::run(&runtime.executable, &arguments, deadline, runtime.output_limit) {
+    let captured = match runner::run(
+        &runtime.executable,
+        &arguments,
+        deadline,
+        runtime.output_limit,
+    ) {
         Ok(captured) => captured,
         Err(error) => {
             eprintln!("herdr client execution failed: {error}");
@@ -989,15 +1028,21 @@ fn execute_command<T: ExternalCommand>(runtime: &Runtime, session: &Session, com
 }
 
 impl ExternalCommand for WorkspaceCreate_Data {
-    fn response_id(&self) -> &'static str { "cli:workspace:create" }
+    fn response_id(&self) -> &'static str {
+        "cli:workspace:create"
+    }
     fn decode_success(&self, stdout: &[u8], session: &Session) -> ExternalOutcome {
         decode_workspace(stdout, session)
     }
 }
 
 impl ExternalCommand for AgentStart_Data {
-    fn timeout(&self, _runtime: &Runtime) -> Option<Duration> { positive_duration(self.timeout.0) }
-    fn response_id(&self) -> &'static str { "cli:agent:start" }
+    fn timeout(&self, _runtime: &Runtime) -> Option<Duration> {
+        positive_duration(self.timeout.0)
+    }
+    fn response_id(&self) -> &'static str {
+        "cli:agent:start"
+    }
     fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
         decode_start(
             stdout,
@@ -1009,21 +1054,31 @@ impl ExternalCommand for AgentStart_Data {
 }
 
 impl ExternalCommand for AgentPrompt_Data {
-    fn response_id(&self) -> &'static str { "cli:agent:prompt" }
+    fn response_id(&self) -> &'static str {
+        "cli:agent:prompt"
+    }
     fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
         decode_prompt(stdout, &self.pane_id.0)
     }
 }
 
 impl ExternalCommand for SendKeys_Data {
-    fn response_id(&self) -> &'static str { "cli:pane:send-keys" }
+    fn response_id(&self) -> &'static str {
+        "cli:pane:send-keys"
+    }
     fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
-        if stdout.is_empty() { ExternalOutcome::Done } else { ExternalOutcome::Uncertain }
+        if stdout.is_empty() {
+            ExternalOutcome::Done
+        } else {
+            ExternalOutcome::Uncertain
+        }
     }
 }
 
 impl ExternalCommand for PaneCloseArgument {
-    fn response_id(&self) -> &'static str { "cli:pane:close" }
+    fn response_id(&self) -> &'static str {
+        "cli:pane:close"
+    }
     fn decode_success(&self, stdout: &[u8], _session: &Session) -> ExternalOutcome {
         decode_ok(stdout, Some(self.response_id()))
     }
@@ -1521,7 +1576,8 @@ mod tests {
         let mut expected = NexusPeer::capture(PeerIdentity {
             user_id: UserId(i64::from(nix::unistd::getuid().as_raw())),
             process_id: ProcessId(i64::from(std::process::id())),
-        }).expect("current pidfd");
+        })
+        .expect("current pidfd");
         expected.live.identity.process_id = ProcessId(i64::from(std::process::id()) + 1);
         serve_one_paired(
             &mut server,
@@ -1617,7 +1673,8 @@ mod tests {
             panic!("pane listing expected");
         };
         assert_eq!(panes.len(), 3);
-        let ExternalOutcome::Agents(agents) = decode_agents(agents.as_bytes(), &Session("main".into()))
+        let ExternalOutcome::Agents(agents) =
+            decode_agents(agents.as_bytes(), &Session("main".into()))
         else {
             panic!("agent listing expected");
         };
@@ -1744,18 +1801,13 @@ mod tests {
         };
         use shared_translator::{FrameReading, FrameWriting, Restorable, Signal, Signalizable};
 
-        let directory = std::env::temp_dir().join(format!(
-            "herdr-front-start-timeout-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("herdr-front-start-timeout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir(&directory).expect("fixture directory");
         let core_path = directory.join("herdr-nexus.sock");
-        let front_path = directory.join(
-            herdr_nexus_wire::socket_names()
-                .public_translator_socket
-                .0,
-        );
+        let front_path =
+            directory.join(herdr_nexus_wire::socket_names().public_translator_socket.0);
         let core_listener = UnixListener::bind(&core_path).expect("core fixture socket");
         let front_listener = UnixListener::bind(&front_path).expect("front fixture socket");
 
@@ -1774,9 +1826,9 @@ mod tests {
             ));
             std::thread::sleep(Duration::from_millis(75));
             let response = herdr_nexus_wire::public_call::Response::Answered(
-                herdr_nexus_wire::public_payload::Output(
-                    signal_herdr_nexus::Response::Started(signal_herdr_nexus::Outcome::Done),
-                ),
+                herdr_nexus_wire::public_payload::Output(signal_herdr_nexus::Response::Started(
+                    signal_herdr_nexus::Outcome::Done,
+                )),
             )
             .signalize()
             .expect("response signal");
@@ -1799,9 +1851,7 @@ mod tests {
             runtime: shared_translator::placement::Runtime(
                 directory.to_string_lossy().into_owned(),
             ),
-            state: shared_translator::placement::State(
-                directory.to_string_lossy().into_owned(),
-            ),
+            state: shared_translator::placement::State(directory.to_string_lossy().into_owned()),
         };
         let front = std::thread::spawn(move || {
             let (mut stream, _) = front_listener.accept().expect("front connection");

@@ -15,8 +15,12 @@ pub trait SourceObservable {
     type Request;
     type Observation;
     type Failure;
-    fn observe<D, C>(&self, request: Self::Request, delivery: &D, cancellation: &C)
-        -> Result<(), Self::Failure>
+    fn observe<D, C>(
+        &self,
+        request: Self::Request,
+        delivery: &D,
+        cancellation: &C,
+    ) -> Result<(), Self::Failure>
     where
         D: Deliverable<Item = Self::Observation, Failure = Self::Failure>,
         C: Cancellable;

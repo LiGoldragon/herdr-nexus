@@ -1,18 +1,18 @@
 //! Shared typed ingress and bounded lane framing for the herdr Nexus.
 
-pub mod frame;
-pub mod observation_ports;
-pub mod wake_queue;
-#[path = "generated/observation-stream.rs"]
-pub mod observation_stream;
 pub mod deadline;
+pub mod frame;
 #[allow(unused_imports)] // the generated module imports the transport types it may not use
 pub mod meta_call;
 pub mod meta_payload;
+pub mod observation_ports;
+#[path = "generated/observation-stream.rs"]
+pub mod observation_stream;
 #[allow(unused_imports)] // the generated module imports the transport types it may not use
 pub mod public_call;
 pub mod public_payload;
 pub mod transport_types;
+pub mod wake_queue;
 
 pub fn socket_names() -> transport_types::SocketNames {
     transport_types::SocketNames {
@@ -52,11 +52,8 @@ impl TryFrom<&transport_types::Admission> for ValidAdmission {
             .filter(|value| *value > 0)
             .ok_or("retry delay must be positive and representable")?;
         let retry_delay = std::time::Duration::from_millis(retry_milliseconds);
-        let admission = shared_translator::unix::Admission::new(
-            deadline,
-            frame_capacity,
-            retry_delay,
-        )?;
+        let admission =
+            shared_translator::unix::Admission::new(deadline, frame_capacity, retry_delay)?;
         use shared_translator::unix::AdmissionAccess;
         Ok(Self {
             deadline: admission.deadline(),
@@ -69,7 +66,10 @@ impl TryFrom<&transport_types::Admission> for ValidAdmission {
 pub fn accept_with_retry(
     listener: &std::os::unix::net::UnixListener,
     retry_delay: std::time::Duration,
-) -> std::io::Result<(std::os::unix::net::UnixStream, std::os::unix::net::SocketAddr)> {
+) -> std::io::Result<(
+    std::os::unix::net::UnixStream,
+    std::os::unix::net::SocketAddr,
+)> {
     shared_translator::unix::accept_with_retry(listener, retry_delay)
 }
 

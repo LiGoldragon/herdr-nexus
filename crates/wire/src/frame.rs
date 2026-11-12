@@ -55,7 +55,9 @@ impl From<shared_translator::unix::Error> for TransportError {
             shared_translator::unix::Error::InvalidLimit => Self::InvalidLimit,
             shared_translator::unix::Error::InvalidLength => Self::InvalidLength,
             shared_translator::unix::Error::TooLarge => Self::TooLarge,
-            shared_translator::unix::Error::PeerCredential(message) => Self::PeerCredential(message),
+            shared_translator::unix::Error::PeerCredential(message) => {
+                Self::PeerCredential(message)
+            }
         }
     }
 }
@@ -82,11 +84,11 @@ pub fn read_frame_after_idle(
     progress_timeout: std::time::Duration,
     admission_limit: usize,
 ) -> Result<Option<Frame>, TransportError> {
-    let Some(raw) = shared_translator::unix::read_frame_after_idle(
-        stream,
-        progress_timeout,
-        admission_limit,
-    )? else { return Ok(None) };
+    let Some(raw) =
+        shared_translator::unix::read_frame_after_idle(stream, progress_timeout, admission_limit)?
+    else {
+        return Ok(None);
+    };
     let lane = decode_lane(raw.lane)?;
     let kind = decode_kind(raw.kind)?;
     let frame = Frame {
@@ -116,7 +118,8 @@ pub fn write_frame(
             payload: frame.payload.clone(),
         },
         admission_limit,
-    ).map_err(Into::into)
+    )
+    .map_err(Into::into)
 }
 
 #[derive(Debug)]
@@ -134,7 +137,9 @@ pub fn write_frame_witness(
     admission_limit: usize,
 ) -> Result<(), IncompleteSubmission> {
     if matches!(frame.lane, Lane::PublicText | Lane::MetaText) {
-        frame.text().map_err(|error| IncompleteSubmission { written: 0, error })?;
+        frame
+            .text()
+            .map_err(|error| IncompleteSubmission { written: 0, error })?;
     }
     shared_translator::unix::write_frame_witness(
         output,
@@ -144,10 +149,16 @@ pub fn write_frame_witness(
             payload: frame.payload.clone(),
         },
         admission_limit,
-    ).map_err(|failure| IncompleteSubmission { written: failure.written, error: failure.error.into() })
+    )
+    .map_err(|failure| IncompleteSubmission {
+        written: failure.written,
+        error: failure.error.into(),
+    })
 }
 
-pub fn peer_caller(stream: &std::os::unix::net::UnixStream) -> Result<shared_translator::Caller, TransportError> {
+pub fn peer_caller(
+    stream: &std::os::unix::net::UnixStream,
+) -> Result<shared_translator::Caller, TransportError> {
     let credentials = shared_translator::unix::peer_credentials(stream)?;
     Ok(shared_translator::Caller {
         process_id: credentials.process_id,
@@ -238,23 +249,41 @@ mod tests {
 
     #[test]
     fn submission_witness_distinguishes_partial_from_complete() {
-        struct StopsAfter { limit: usize, bytes: Vec<u8> }
+        struct StopsAfter {
+            limit: usize,
+            bytes: Vec<u8>,
+        }
         impl Write for StopsAfter {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
                 if self.bytes.len() == self.limit {
-                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "fixture stop"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        "fixture stop",
+                    ));
                 }
                 let count = bytes.len().min(self.limit - self.bytes.len());
                 self.bytes.extend_from_slice(&bytes[..count]);
                 Ok(count)
             }
-            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
         }
-        let frame = Frame { lane: Lane::EmissionSignal, kind: Kind::Request, payload: vec![1, 2, 3] };
-        let mut partial = StopsAfter { limit: 5, bytes: Vec::new() };
+        let frame = Frame {
+            lane: Lane::EmissionSignal,
+            kind: Kind::Request,
+            payload: vec![1, 2, 3],
+        };
+        let mut partial = StopsAfter {
+            limit: 5,
+            bytes: Vec::new(),
+        };
         let failure = write_frame_witness(&mut partial, &frame, 64).expect_err("partial fixture");
         assert_eq!(failure.written, 5);
-        let mut complete = StopsAfter { limit: 9, bytes: Vec::new() };
+        let mut complete = StopsAfter {
+            limit: 9,
+            bytes: Vec::new(),
+        };
         write_frame_witness(&mut complete, &frame, 64).expect("complete submission");
     }
 

@@ -21,11 +21,24 @@ pub struct WakeQueue<T> {
 
 impl<T> WakeQueue<T> {
     pub fn new(capacity: usize) -> io::Result<Self> {
-        if capacity == 0 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "zero queue capacity")); }
+        if capacity == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "zero queue capacity",
+            ));
+        }
         let (wake_reader, wake_writer) = UnixStream::pair()?;
         wake_reader.set_nonblocking(true)?;
         wake_writer.set_nonblocking(true)?;
-        Ok(Self { state: Mutex::new(QueueState { pending: VecDeque::new(), capacity, closed: false }), wake_reader, wake_writer })
+        Ok(Self {
+            state: Mutex::new(QueueState {
+                pending: VecDeque::new(),
+                capacity,
+                closed: false,
+            }),
+            wake_reader,
+            wake_writer,
+        })
     }
 
     fn wake(&self) -> io::Result<()> {
@@ -62,14 +75,21 @@ impl<T> WakeQueue<T> {
         loop {
             let mut descriptors = [PollFd::new(peer.as_fd(), PollFlags::POLLIN)];
             poll(&mut descriptors, 0_u8)?;
-            if descriptors[0].revents().is_some_and(|flags| !flags.is_empty()) {
+            if descriptors[0]
+                .revents()
+                .is_some_and(|flags| !flags.is_empty())
+            {
                 self.close();
                 return Ok(None);
             }
             {
                 let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-                if state.closed { return Ok(None); }
-                if let Some(item) = state.pending.pop_front() { return Ok(Some(item)); }
+                if state.closed {
+                    return Ok(None);
+                }
+                if let Some(item) = state.pending.pop_front() {
+                    return Ok(Some(item));
+                }
             }
             let mut descriptors = [
                 PollFd::new(self.wake_reader.as_fd(), PollFlags::POLLIN),
@@ -80,12 +100,18 @@ impl<T> WakeQueue<T> {
                 Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => return Err(error.into()),
             }
-            if descriptors[1].revents().is_some_and(|flags| !flags.is_empty()) {
+            if descriptors[1]
+                .revents()
+                .is_some_and(|flags| !flags.is_empty())
+            {
                 self.close();
                 return Ok(None);
             }
             let mut bytes = [0; 256];
-            while (&self.wake_reader).read(&mut bytes).is_ok_and(|count| count > 0) {}
+            while (&self.wake_reader)
+                .read(&mut bytes)
+                .is_ok_and(|count| count > 0)
+            {}
         }
     }
 }
@@ -100,7 +126,10 @@ impl<T> Deliverable for WakeQueue<T> {
             state.pending.clear();
             drop(state);
             self.wake()?;
-            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "subscriber closed or overflowed"));
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "subscriber closed or overflowed",
+            ));
         }
         state.pending.push_back(item);
         drop(state);
@@ -111,7 +140,7 @@ impl<T> Deliverable for WakeQueue<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, mpsc};
+    use std::sync::{mpsc, Arc};
     use std::time::Duration;
     #[test]
     fn quiet_eof_wakes_without_a_timer() {

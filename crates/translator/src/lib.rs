@@ -1,7 +1,7 @@
 //! Text-front translator and typed herdr external boundary.
 
-pub mod runner;
 pub mod observation;
+pub mod runner;
 pub mod server;
 pub mod generated {
     pub mod argument;
@@ -118,7 +118,8 @@ pub use shared_translator::placement;
 pub fn text_budget(nodes: usize, depth: usize) -> datom_codec::Budget {
     datom_codec::Budget {
         remaining: i64::try_from(nodes).expect("validated text nodes fit i64"),
-        reader: protos::ReaderBudget::try_from(nodes).expect("validated text nodes fit the reader budget"),
+        reader: protos::ReaderBudget::try_from(nodes)
+            .expect("validated text nodes fit the reader budget"),
         depth: 0,
         maximum_depth: i64::try_from(depth).expect("validated text depth fits i64"),
     }

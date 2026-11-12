@@ -12,6 +12,7 @@ pub enum Lane {
     PublicText,
     MetaText,
     EmissionSignal,
+    ObservationSignal,
 }
 #[rustfmt::skip]
 #[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]

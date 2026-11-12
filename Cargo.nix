@@ -871,7 +871,7 @@ rec {
           {
             name = "nix";
             packageId = "nix";
-            features = [ "socket" ];
+            features = [ "socket" "poll" ];
           }
           {
             name = "protos";
@@ -1862,13 +1862,13 @@ rec {
       };
       "signal-herdr-nexus" = rec {
         crateName = "signal-herdr-nexus";
-        version = "0.4.0";
+        version = "0.5.0";
         edition = "2021";
         workspace_member = null;
         src = pkgs.fetchgit {
           url = "https://github.com/LiGoldragon/signal-herdr-nexus";
-          rev = "10b9d215097504d5c911bb491ef8a5f276a3c683";
-          sha256 = "12fvhvyh0zaaf135pr7vm71alcyvv7fbdxp1ig5cr0r3c3nap8ck";
+          rev = "da517ff18ca36008730f69102361184559ced343";
+          sha256 = "04jjad8i54v040fwmpbz1rpgbcchih1r0s3dylbwwqqri3mpn1ih";
         };
         libName = "signal_herdr_nexus";
         dependencies = [
